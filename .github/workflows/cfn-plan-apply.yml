@@ -3,13 +3,13 @@ name: vpc-deploy
 on:
   pull_request:
     paths:
-      - "cloudformation/vpc-simple.yaml"
+      - "cloudformation/vpc.yaml"
       - "cloudformation/parameters/**"
       - ".github/workflows/vpc-deploy.yaml"
   push:
     branches: ["main"]
     paths:
-      - "cloudformation/vpc-simple.yaml"
+      - "cloudformation/vpc.yaml"
       - "cloudformation/parameters/**"
       - ".github/workflows/vpc-deploy.yaml"
 
