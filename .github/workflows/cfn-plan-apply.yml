@@ -1,17 +1,17 @@
-name: vpc-deploy
+name: cfn-plan-apply
 
 on:
   pull_request:
     paths:
       - "cloudformation/vpc.yaml"
       - "cloudformation/parameters/**"
-      - ".github/workflows/vpc-deploy.yaml"
+      - ".github/workflows/cfn-plan-apply.yaml"
   push:
     branches: ["main"]
     paths:
       - "cloudformation/vpc.yaml"
       - "cloudformation/parameters/**"
-      - ".github/workflows/vpc-deploy.yaml"
+      - ".github/workflows/cfn-plan-apply.yaml"
 
 permissions:
   id-token: write
