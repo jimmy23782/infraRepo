@@ -1,0 +1,50 @@
+name: vpc-deploy
+
+on:
+  pull_request:
+    paths:
+      - "cloudformation/vpc-simple.yaml"
+      - "cloudformation/parameters/**"
+      - ".github/workflows/vpc-deploy.yaml"
+  push:
+    branches: ["main"]
+    paths:
+      - "cloudformation/vpc-simple.yaml"
+      - "cloudformation/parameters/**"
+      - ".github/workflows/vpc-deploy.yaml"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_REGION: ap-southeast-2
+  ENV: dev
+  STACK_NAME: demo-eks-vpc-dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::685801731369:role/github-oidc-deployer
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create/Update VPC stack
+        run: |
+          aws cloudformation deploy \
+            --template-file cloudformation/vpc-simple.yaml \
+            --stack-name $STACK_NAME \
+            --parameter-overrides file://cloudformation/parameters/${ENV}/vpc.json \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Show outputs
+        run: |
+          aws cloudformation describe-stacks --stack-name $STACK_NAME \
+            --query "Stacks[0].Outputs" --output table
