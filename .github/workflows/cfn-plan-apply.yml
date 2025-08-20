@@ -45,22 +45,22 @@ jobs:
             --parameter-overrides file://cloudformation/parameters/${ENV}/vpc.json \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
-
+            
+      # Get VPC outputs (PublicSubnetIds)
       - name: Get VPC outputs
         id: vpc
         run: |
           OUT=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" --query "Stacks[0].Outputs")
-          echo "public_subnets=$(echo $OUT | jq -r '.[] | select(.OutputKey==\"PublicSubnetIds\").OutputValue')" >> $GITHUB_OUTPUT
+          echo "public_subnets=$(echo "$OUT" | jq -r '.[] | select(.OutputKey=="PublicSubnetIds").OutputValue')" >> $GITHUB_OUTPUT
 
-      # ----- EKS control plane -----
+      # Deploy EKS cluster (use jq to expand JSON params into Key=Value pairs)
       - name: Create/Update EKS cluster
         run: |
+          PARAMS=$(jq -r '.Parameters | to_entries[] | "\(.key)=\(.value)"' cloudformation/parameters/${ENV}/eks.json)
           aws cloudformation deploy \
             --template-file cloudformation/eks-cluster.yaml \
             --stack-name "${EKS_STACK}" \
-            --parameter-overrides \
-              file://cloudformation/parameters/${ENV}/eks.json \
-              PublicSubnetIds=${{ steps.vpc.outputs.public_subnets }} \
+            --parameter-overrides $PARAMS PublicSubnetIds=${{ steps.vpc.outputs.public_subnets }} \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
 
@@ -70,14 +70,13 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
           aws eks wait cluster-active --name "$CLUSTER"
 
-      # ----- Node group -----
+      # Deploy node group (same param trick + inject PublicSubnetIds)
       - name: Create/Update node group
         run: |
+          PARAMS=$(jq -r '.Parameters | to_entries[] | "\(.key)=\(.value)"' cloudformation/parameters/${ENV}/nodegroup.json)
           aws cloudformation deploy \
             --template-file cloudformation/nodegroup.yaml \
             --stack-name "${NG_STACK}" \
-            --parameter-overrides \
-              file://cloudformation/parameters/${ENV}/nodegroup.json \
-              PublicSubnetIds=${{ steps.vpc.outputs.public_subnets }} \
+            --parameter-overrides $PARAMS PublicSubnetIds=${{ steps.vpc.outputs.public_subnets }} \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
