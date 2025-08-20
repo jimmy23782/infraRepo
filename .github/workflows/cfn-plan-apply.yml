@@ -41,7 +41,7 @@ jobs:
         run: |
           aws cloudformation deploy \
             --template-file cloudformation/vpc.yaml \
-            --stack-name $STACK_NAME \
+            --stack-name $VPC_STACK \
             --parameter-overrides file://cloudformation/parameters/${ENV}/vpc.json \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
