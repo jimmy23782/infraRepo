@@ -1,0 +1,37 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "IamForClusterAndOIDC",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole","iam:DeleteRole","iam:UpdateRole","iam:UpdateAssumeRolePolicy",
+        "iam:AttachRolePolicy","iam:DetachRolePolicy",
+        "iam:PutRolePolicy","iam:DeleteRolePolicy",
+        "iam:PassRole",
+        "iam:CreateOpenIDConnectProvider","iam:DeleteOpenIDConnectProvider",
+        "iam:TagRole","iam:UntagRole",
+        "iam:TagOpenIDConnectProvider","iam:UntagOpenIDConnectProvider"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EksControlPlane",
+      "Effect": "Allow",
+      "Action": [
+        "eks:CreateCluster","eks:DescribeCluster","eks:DeleteCluster",
+        "eks:TagResource","eks:UntagResource","eks:ListTagsForResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DescribeNetworking",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeVpcs","ec2:DescribeSubnets","ec2:DescribeRouteTables",
+        "ec2:DescribeSecurityGroups","ec2:DescribeInternetGateways"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+name: iam-apply
+on:
+  workflow_dispatch: {}   # run manually when you change JSONs
+  push:
+    branches: ["main"]
+    paths:
+      - "cloudformation/iam/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-2
+  ROLE_NAME: github-oidc-deployer
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::685801731369:role/github-oidc-deployer
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Optional: show current trust (read-only)
+      - name: Show current trust policy (optional)
+        continue-on-error: true
+        run: aws iam get-role --role-name "$ROLE_NAME" --query 'Role.AssumeRolePolicyDocument' --output json
+
+      # Update inline policy from repo file
+      - name: Put inline policy from repo JSON
+        run: |
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name eks-deploy-inline \
+            --policy-document file://cloudformation/iam/eks-deploy-inline.json
+
+      # If you ever change trust boundaries, uncomment to update trust from repo
+      # (Note: requires iam:UpdateAssumeRolePolicy on the target role)
+      # - name: Update trust policy from repo JSON
+      #   run: |
+      #     TRUST=$(cat cloudformation/iam/github-oidc-trust.json)
+      #     aws iam update-assume-role-policy \
+      #       --role-name "$ROLE_NAME" \
+      #       --policy-document "$TRUST"
