@@ -1,0 +1,44 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Minimal EKS control plane (public endpoint) for labs
+
+Parameters:
+  ClusterName:
+    Type: String
+  KubernetesVersion:
+    Type: String
+    Default: "1.30"
+  PublicSubnetIds:
+    Type: List<String>
+
+Resources:
+  EksClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt EksClusterRole.Arn
+      ResourcesVpcConfig:
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: false
+        SubnetIds: !Ref PublicSubnetIds
+
+Outputs:
+  ClusterName:
+    Description: EKS cluster name
+    Value: !Ref EksCluster
+  ClusterArn:
+    Description: EKS cluster ARN
+    Value: !GetAtt EksCluster.Arn

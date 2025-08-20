@@ -1,0 +1,11 @@
+{
+  "Parameters": {
+    "ClusterName": "demo-eks-dev",
+    "NodeGroupName": "ng-public",
+    "NodeInstanceType": "t3.small",
+    "DesiredSize": "1",
+    "MinSize": "1",
+    "MaxSize": "2",
+    "DiskSizeGiB": "20"
+  }
+}

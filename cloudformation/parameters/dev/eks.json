@@ -1,0 +1,6 @@
+{
+  "Parameters": {
+    "ClusterName": "demo-eks-dev",
+    "KubernetesVersion": "1.30"
+  }
+}

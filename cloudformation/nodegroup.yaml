@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EKS managed node group (public subnets) for labs
+
+Parameters:
+  ClusterName:
+    Type: String
+  NodeGroupName:
+    Type: String
+    Default: "ng-public"
+  PublicSubnetIds:
+    Type: List<String>
+  NodeInstanceType:
+    Type: String
+    Default: "t3.small"
+  DesiredSize:
+    Type: Number
+    Default: 1
+  MinSize:
+    Type: Number
+    Default: 1
+  MaxSize:
+    Type: Number
+    Default: 2
+  DiskSizeGiB:
+    Type: Number
+    Default: 20
+
+Resources:
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+  ManagedNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref ClusterName
+      NodegroupName: !Ref NodeGroupName
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets: !Ref PublicSubnetIds
+      InstanceTypes:
+        - !Ref NodeInstanceType
+      AmiType: AL2_x86_64
+      DiskSize: !Ref DiskSizeGiB
+      ScalingConfig:
+        DesiredSize: !Ref DesiredSize
+        MinSize: !Ref MinSize
+        MaxSize: !Ref MaxSize
+
+Outputs:
+  NodeRoleArn:
+    Description: Role used by nodes
+    Value: !GetAtt NodeRole.Arn
