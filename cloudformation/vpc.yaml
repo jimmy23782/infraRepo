@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Minimal VPC for EKS/Labs (2 public subnets, 0 NAT) - ap-southeast-2
 Parameters:
-  VpcCidr: { Type: String, Default: 10.0.0.0/16 }
-  AZ1:     { Type: AWS::EC2::AvailabilityZone::Name, Default: ap-southeast-2a }
-  AZ2:     { Type: AWS::EC2::AvailabilityZone::Name, Default: ap-southeast-2b }
-  Pub1Cidr:{ Type: String, Default: 10.0.0.0/20 }
-  Pub2Cidr:{ Type: String, Default: 10.0.16.0/20 }
+  VpcCidr: { Type: String, Default: "10.0.0.0/16" }
+  AZ1:     { Type: AWS::EC2::AvailabilityZone::Name, Default: "ap-southeast-2a" }
+  AZ2:     { Type: AWS::EC2::AvailabilityZone::Name, Default: "ap-southeast-2b" }
+  Pub1Cidr:{ Type: String, Default: "10.0.0.0/20" }
+  Pub2Cidr:{ Type: String, Default: "10.0.16.0/20" }
 
 Resources:
   VPC:
