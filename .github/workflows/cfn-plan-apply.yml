@@ -5,13 +5,13 @@ on:
     paths:
       - "cloudformation/vpc.yaml"
       - "cloudformation/parameters/**"
-      - ".github/workflows/cfn-plan-apply.yaml"
+      - ".github/workflows/cfn-plan-apply.yml"
   push:
     branches: ["main"]
     paths:
       - "cloudformation/vpc.yaml"
       - "cloudformation/parameters/**"
-      - ".github/workflows/cfn-plan-apply.yaml"
+      - ".github/workflows/cfn-plan-apply.yml"
 
 permissions:
   id-token: write
