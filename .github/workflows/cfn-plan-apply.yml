@@ -38,7 +38,7 @@ jobs:
       - name: Create/Update VPC stack
         run: |
           aws cloudformation deploy \
-            --template-file cloudformation/vpc-simple.yaml \
+            --template-file cloudformation/vpc.yaml \
             --stack-name $STACK_NAME \
             --parameter-overrides file://cloudformation/parameters/${ENV}/vpc.json \
             --capabilities CAPABILITY_NAMED_IAM \
