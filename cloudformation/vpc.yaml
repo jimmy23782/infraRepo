@@ -1,11 +1,22 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Minimal VPC for EKS/Labs (2 public subnets, 0 NAT) - ap-southeast-2
+
 Parameters:
-  VpcCidr: { Type: String, Default: "10.0.0.0/16" }
-  AZ1:     { Type: AWS::EC2::AvailabilityZone::Name, Default: "ap-southeast-2a" }
-  AZ2:     { Type: AWS::EC2::AvailabilityZone::Name, Default: "ap-southeast-2b" }
-  Pub1Cidr:{ Type: String, Default: "10.0.0.0/20" }
-  Pub2Cidr:{ Type: String, Default: "10.0.16.0/20" }
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+  AZ1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: "ap-southeast-2a"
+  AZ2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: "ap-southeast-2b"
+  Pub1Cidr:
+    Type: String
+    Default: "10.0.0.0/20"
+  Pub2Cidr:
+    Type: String
+    Default: "10.0.16.0/20"
 
 Resources:
   VPC:
@@ -14,22 +25,29 @@ Resources:
       CidrBlock: !Ref VpcCidr
       EnableDnsHostnames: true
       EnableDnsSupport: true
-      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-vpc" }]
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
 
   IGW:
     Type: AWS::EC2::InternetGateway
+
   AttachIgw:
     Type: AWS::EC2::VPCGatewayAttachment
-    Properties: { VpcId: !Ref VPC, InternetGatewayId: !Ref IGW }
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref IGW
 
   PublicRT:
     Type: AWS::EC2::RouteTable
-    Properties: { VpcId: !Ref VPC }
+    Properties:
+      VpcId: !Ref VPC
+
   PublicDefaultRoute:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PublicRT
-      DestinationCidrBlock: 0.0.0.0/0
+      DestinationCidrBlock: "0.0.0.0/0"
       GatewayId: !Ref IGW
 
   PublicSubnet1:
@@ -39,7 +57,10 @@ Resources:
       AvailabilityZone: !Ref AZ1
       CidrBlock: !Ref Pub1Cidr
       MapPublicIpOnLaunch: true
-      Tags: [{ Key: kubernetes.io/role/elb, Value: "1" }]
+      Tags:
+        - Key: kubernetes.io/role/elb
+          Value: "1"
+
   PublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
@@ -47,15 +68,33 @@ Resources:
       AvailabilityZone: !Ref AZ2
       CidrBlock: !Ref Pub2Cidr
       MapPublicIpOnLaunch: true
-      Tags: [{ Key: kubernetes.io/role/elb, Value: "1" }]
+      Tags:
+        - Key: kubernetes.io/role/elb
+          Value: "1"
 
   AssocPub1:
     Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties: { SubnetId: !Ref PublicSubnet1, RouteTableId: !Ref PublicRT }
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRT
+
   AssocPub2:
     Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties: { SubnetId: !Ref PublicSubnet2, RouteTableId: !Ref PublicRT }
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRT
 
 Outputs:
-  VpcId:           { Value: !Ref VPC }
-  PublicSubnetIds: { Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]] }
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${AWS::StackName}:VpcId"
+  PublicSubnetIds:
+    Description: Comma-separated public subnet IDs (AZ1, AZ2)
+    Value: !Join
+      - ","
+      - - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+    Export:
+      Name: !Sub "${AWS::StackName}:PublicSubnetIds"
