@@ -18,8 +18,7 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal:
-              Service: eks.amazonaws.com
+            Principal: { Service: eks.amazonaws.com }
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
@@ -35,6 +34,14 @@ Resources:
         EndpointPrivateAccess: false
         SubnetIds: !Ref PublicSubnetIds
 
+  OIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      # This already returns the full https URL that IAM expects
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList:
+        - sts.amazonaws.com
+
 Outputs:
   ClusterName:
     Description: EKS cluster name
@@ -42,3 +49,9 @@ Outputs:
   ClusterArn:
     Description: EKS cluster ARN
     Value: !GetAtt EksCluster.Arn
+  OIDCProviderArn:
+    Description: OIDC provider ARN
+    Value: !Ref OIDCProvider
+  ClusterRoleArn:
+    Description: Cluster IAM role
+    Value: !GetAtt EksClusterRole.Arn

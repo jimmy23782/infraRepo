@@ -30,13 +30,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ensure jq
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::685801731369:role/github-oidc-deployer
           aws-region: ${{ env.AWS_REGION }}
 
-      # ----- VPC (already exists, stays idempotent) -----
+      - name: Validate CFN templates
+        run: |
+          aws cloudformation validate-template --template-body file://cloudformation/vpc.yaml
+          aws cloudformation validate-template --template-body file://cloudformation/eks-cluster.yaml
+          aws cloudformation validate-template --template-body file://cloudformation/nodegroup.yaml
+
       - name: Create/Update VPC stack
         run: |
           aws cloudformation deploy \
@@ -45,22 +53,20 @@ jobs:
             --parameter-overrides file://cloudformation/parameters/${ENV}/vpc.json \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
-            
-      # Get VPC outputs (PublicSubnetIds)
+
       - name: Get VPC outputs
         id: vpc
         run: |
           OUT=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" --query "Stacks[0].Outputs")
           echo "public_subnets=$(echo "$OUT" | jq -r '.[] | select(.OutputKey=="PublicSubnetIds").OutputValue')" >> $GITHUB_OUTPUT
 
-      # Deploy EKS cluster (use jq to expand JSON params into Key=Value pairs)
       - name: Create/Update EKS cluster
         run: |
           PARAMS=$(jq -r '.Parameters | to_entries[] | "\(.key)=\(.value)"' cloudformation/parameters/${ENV}/eks.json)
           aws cloudformation deploy \
             --template-file cloudformation/eks-cluster.yaml \
             --stack-name "${EKS_STACK}" \
-            --parameter-overrides $PARAMS PublicSubnetIds=${{ steps.vpc.outputs.public_subnets }} \
+            --parameter-overrides $PARAMS PublicSubnetIds="${{ steps.vpc.outputs.public_subnets }}" \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
 
@@ -70,13 +76,23 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
           aws eks wait cluster-active --name "$CLUSTER"
 
-      # Deploy node group (same param trick + inject PublicSubnetIds)
+      - name: Tag subnets with cluster discoverability tag
+        run: |
+          CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
+          SUBNETS="${{ steps.vpc.outputs.public_subnets }}"
+          IFS=',' read -r -a ARR <<< "$SUBNETS"
+          for s in "${ARR[@]}"; do
+            aws ec2 create-tags --resources "$s" \
+              --tags "Key=kubernetes.io/cluster/${CLUSTER},Value=shared"
+          done
+
       - name: Create/Update node group
         run: |
           PARAMS=$(jq -r '.Parameters | to_entries[] | "\(.key)=\(.value)"' cloudformation/parameters/${ENV}/nodegroup.json)
           aws cloudformation deploy \
             --template-file cloudformation/nodegroup.yaml \
             --stack-name "${NG_STACK}" \
-            --parameter-overrides $PARAMS PublicSubnetIds=${{ steps.vpc.outputs.public_subnets }} \
+            --parameter-overrides $PARAMS PublicSubnetIds="${{ steps.vpc.outputs.public_subnets }}" \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
