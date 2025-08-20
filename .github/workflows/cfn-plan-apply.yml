@@ -45,6 +45,7 @@ jobs:
           aws cloudformation validate-template --template-body file://cloudformation/eks-cluster.yaml
           aws cloudformation validate-template --template-body file://cloudformation/nodegroup.yaml
 
+      # ---------- VPC ----------
       - name: Create/Update VPC stack
         run: |
           aws cloudformation deploy \
@@ -60,6 +61,7 @@ jobs:
           OUT=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" --query "Stacks[0].Outputs")
           echo "public_subnets=$(echo "$OUT" | jq -r '.[] | select(.OutputKey=="PublicSubnetIds").OutputValue')" >> $GITHUB_OUTPUT
 
+      # ---------- PREFLIGHT: EKS ----------
       - name: Preflight - delete stuck EKS create
         run: |
           STATUS=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
@@ -86,16 +88,16 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
           aws eks wait cluster-active --name "$CLUSTER"
 
-      - name: Tag subnets with cluster discoverability tag
+      # ---------- PREFLIGHT: Nodegroup ----------
+      - name: Preflight - delete stuck Nodegroup create
         run: |
-          CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
-            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
-          SUBNETS="${{ steps.vpc.outputs.public_subnets }}"
-          IFS=',' read -r -a ARR <<< "$SUBNETS"
-          for s in "${ARR[@]}"; do
-            aws ec2 create-tags --resources "$s" \
-              --tags "Key=kubernetes.io/cluster/${CLUSTER},Value=shared"
-          done
+          STATUS=$(aws cloudformation describe-stacks --stack-name "${NG_STACK}" \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          echo "Nodegroup stack status: $STATUS"
+          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" ]]; then
+            aws cloudformation delete-stack --stack-name "${NG_STACK}" || true
+            aws cloudformation wait stack-delete-complete --stack-name "${NG_STACK}" || true
+          fi
 
       - name: Create/Update node group
         run: |
@@ -106,3 +108,20 @@ jobs:
             --parameter-overrides $PARAMS PublicSubnetIds="${{ steps.vpc.outputs.public_subnets }}" \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
+
+      # ---------- Failure event dumps (helpful on error) ----------
+      - name: Show EKS stack failure events (if any)
+        if: failure()
+        run: |
+          aws cloudformation describe-stack-events --stack-name "${EKS_STACK}" \
+            --max-items 40 \
+            --query "StackEvents[?ends_with(ResourceStatus,'FAILED')].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
+            --output table
+
+      - name: Show Nodegroup stack failure events (if any)
+        if: failure()
+        run: |
+          aws cloudformation describe-stack-events --stack-name "${NG_STACK}" \
+            --max-items 40 \
+            --query "StackEvents[?ends_with(ResourceStatus,'FAILED')].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
+            --output table

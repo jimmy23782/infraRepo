@@ -11,7 +11,7 @@
         "iam:CreateOpenIDConnectProvider","iam:DeleteOpenIDConnectProvider",
         "iam:TagRole","iam:UntagRole",
         "iam:TagOpenIDConnectProvider","iam:UntagOpenIDConnectProvider",
-        "iam:CreateServiceLinkedRole"                
+        "iam:CreateServiceLinkedRole"
       ],
       "Resource": "*"
     },
