@@ -1,0 +1,138 @@
+name: destroy-infra
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Environment (e.g. dev)"
+        required: true
+        default: "dev"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-2
+  PREFIX: demo-eks
+  VPC_STACK: demo-eks-vpc-${{ github.event.inputs.env }}
+  EKS_STACK: demo-eks-eks-${{ github.event.inputs.env }}
+  NG_STACK:  demo-eks-nodegroup-${{ github.event.inputs.env }}
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::685801731369:role/github-oidc-deployer
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Show current stacks (for context)
+        run: |
+          aws cloudformation describe-stacks --query "Stacks[].{Name:StackName,Status:StackStatus}" --output table || true
+
+      # -------- Optional k8s cleanup (only runs if kubeconfig works) --------
+      - name: Attempt Kubernetes cleanup (if accessible)
+        continue-on-error: true
+        run: |
+          set -e
+          CLUSTER=$(
+            aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text 2>/dev/null || echo ""
+          )
+          if [ -n "$CLUSTER" ] && aws eks update-kubeconfig --name "$CLUSTER" --region $AWS_REGION >/dev/null 2>&1; then
+            echo "Kubeconfig set. Deleting LoadBalancer Services/Ingress/PVCs to release AWS resources..."
+            kubectl get svc -A | awk '/LoadBalancer/ {print $1, $2}' | xargs -n2 kubectl -n delete svc || true
+            kubectl delete ingress --all -A || true
+            kubectl delete pvc --all -A || true
+          else
+            echo "Skipping k8s cleanup (no access)."
+          fi
+
+      # -------- Nodegroup delete (with self-heal) --------
+      - name: Delete Nodegroup stack
+        run: |
+          if aws cloudformation describe-stacks --stack-name "${NG_STACK}" >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name "${NG_STACK}"
+            aws cloudformation wait stack-delete-complete --stack-name "${NG_STACK}" || true
+          else
+            echo "Nodegroup stack not found."
+          fi
+
+      - name: Heal Nodegroup DELETE_FAILED (retain resources)
+        if: always()
+        run: |
+          STATUS=$(aws cloudformation describe-stacks --stack-name "${NG_STACK}" \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          if [ "$STATUS" = "DELETE_FAILED" ]; then
+            echo "Nodegroup DELETE_FAILED: retaining ManagedNodeGroup & NodeRole then re-deleting..."
+            aws cloudformation delete-stack --stack-name "${NG_STACK}" --retain-resources ManagedNodeGroup NodeRole || true
+            aws cloudformation wait stack-delete-complete --stack-name "${NG_STACK}" || true
+            # try to clean up retained resources if they still exist
+            CLUSTER_NAME=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text 2>/dev/null || echo "")
+            if [ -n "$CLUSTER_NAME" ]; then
+              aws eks list-nodegroups --cluster-name "$CLUSTER_NAME" --region $AWS_REGION \
+                --query 'nodegroups[]' --output text | xargs -r -n1 aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --region $AWS_REGION --nodegroup-name
+            fi
+            ROLE=$(aws cloudformation describe-stack-resources --stack-name "${NG_STACK}" \
+              --logical-resource-id NodeRole --query 'StackResources[0].PhysicalResourceId' --output text 2>/dev/null || echo "")
+            if [ -n "$ROLE" ] && aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
+              for ARN in $(aws iam list-attached-role-policies --role-name "$ROLE" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); do
+                aws iam detach-role-policy --role-name "$ROLE" --policy-arn "$ARN" || true
+              done
+              for P in $(aws iam list-role-policies --role-name "$ROLE" --query 'PolicyNames[]' --output text 2>/dev/null); do
+                aws iam delete-role-policy --role-name "$ROLE" --policy-name "$P" || true
+              done
+              aws iam delete-role --role-name "$ROLE" || true
+            fi
+          fi
+
+      # -------- EKS control plane delete (with self-heal) --------
+      - name: Delete EKS stack
+        run: |
+          if aws cloudformation describe-stacks --stack-name "${EKS_STACK}" >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name "${EKS_STACK}"
+            aws cloudformation wait stack-delete-complete --stack-name "${EKS_STACK}" || true
+          else
+            echo "EKS stack not found."
+          fi
+
+      - name: Heal EKS DELETE_FAILED (retain EksClusterRole)
+        if: always()
+        run: |
+          STATUS=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          if [ "$STATUS" = "DELETE_FAILED" ]; then
+            echo "EKS DELETE_FAILED: retaining EksClusterRole then re-deleting..."
+            aws cloudformation delete-stack --stack-name "${EKS_STACK}" --retain-resources EksClusterRole || true
+            aws cloudformation wait stack-delete-complete --stack-name "${EKS_STACK}" || true
+            ROLE=$(aws cloudformation describe-stack-resources --stack-name "${EKS_STACK}" \
+              --logical-resource-id EksClusterRole --query 'StackResources[0].PhysicalResourceId' --output text 2>/dev/null || echo "")
+            if [ -n "$ROLE" ] && aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
+              for ARN in $(aws iam list-attached-role-policies --role-name "$ROLE" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); do
+                aws iam detach-role-policy --role-name "$ROLE" --policy-arn "$ARN" || true
+              done
+              for P in $(aws iam list-role-policies --role-name "$ROLE" --query 'PolicyNames[]' --output text 2>/dev/null); do
+                aws iam delete-role-policy --role-name "$ROLE" --policy-name "$P" || true
+              done
+              aws iam delete-role --role-name "$ROLE" || true
+            fi
+          fi
+
+      # -------- VPC delete --------
+      - name: Delete VPC stack
+        run: |
+          if aws cloudformation describe-stacks --stack-name "${VPC_STACK}" >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name "${VPC_STACK}"
+            aws cloudformation wait stack-delete-complete --stack-name "${VPC_STACK}" || true
+          else
+            echo "VPC stack not found."
+          fi
+
+      - name: Final stack states
+        run: |
+          aws cloudformation describe-stacks --query "Stacks[].{Name:StackName,Status:StackStatus}" --output table || true
