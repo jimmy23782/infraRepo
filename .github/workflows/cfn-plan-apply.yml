@@ -88,6 +88,20 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
           aws eks wait cluster-active --name "$CLUSTER"
 
+      - name: Bootstrap Argo CD (CFN -> CodeBuild -> Argo install)
+        run: |
+          aws cloudformation deploy \
+            --template-file cloudformation/argocd-bootstrap.yaml \
+            --stack-name demo-eks-argocd-dev \
+            --parameter-overrides \
+              ClusterName=demo-eks-dev \
+              Region=${{ env.AWS_REGION }} \
+              KubernetesNamespace=argocd \
+              ExposeServerAsLB=true \
+              SSMParamPrefix=/eks \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
       # ---------- PREFLIGHT: Nodegroup ----------
       - name: Preflight - delete stuck Nodegroup create
         run: |
