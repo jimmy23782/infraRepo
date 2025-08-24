@@ -45,6 +45,26 @@ jobs:
           aws cloudformation validate-template --template-body file://cloudformation/eks-cluster.yaml
           aws cloudformation validate-template --template-body file://cloudformation/nodegroup.yaml
 
+                # ---------- PREFLIGHT: VPC ----------
+      - name: Preflight - wait if VPC stack is IN_PROGRESS
+        run: |
+          set -e
+          STATUS=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          echo "VPC stack status: $STATUS"
+          case "$STATUS" in
+            CREATE_IN_PROGRESS)
+              aws cloudformation wait stack-create-complete --stack-name "${VPC_STACK}"
+              ;;
+            UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS)
+              aws cloudformation wait stack-update-complete --stack-name "${VPC_STACK}"
+              ;;
+            DELETE_IN_PROGRESS)
+              aws cloudformation wait stack-delete-complete --stack-name "${VPC_STACK}"
+              ;;
+            *) echo "No wait needed." ;;
+          esac
+          
       # ---------- VPC ----------
       - name: Create/Update VPC stack
         run: |
