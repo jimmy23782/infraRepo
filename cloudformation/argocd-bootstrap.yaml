@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Minimal Argo CD bootstrap onto existing EKS via CodeBuild + Lambda (no local kubectl).
+
+Parameters:
+  ClusterName:
+    Type: String
+    Description: Existing EKS cluster name (e.g., demo-eks-dev)
+  Region:
+    Type: String
+    Default: ap-southeast-2
+  KubernetesNamespace:
+    Type: String
+    Default: argocd
+  ExposeServerAsLB:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: If true, patch argocd-server to type=LoadBalancer
+  SSMParamPrefix:
+    Type: String
+    Default: /eks
+    Description: SSM prefix where outputs are stored (e.g., /eks/<cluster>/argocd/*)
+
+Resources:
+
+  # ---- CodeBuild role ----
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: ArgoBootstrapPerms
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:AddTagsToResource
+                Resource: "*"
+
+  # ---- CodeBuild project (no source; just runs commands) ----
+  ArgoBootstrapProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "argocd-bootstrap-${ClusterName}"
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts: { Type: NO_ARTIFACTS }
+      TimeoutInMinutes: 30
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: false
+        EnvironmentVariables:
+          - Name: CLUSTER_NAME
+            Value: !Ref ClusterName
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref Region
+          - Name: K8S_NS
+            Value: !Ref KubernetesNamespace
+          - Name: EXPOSE_LB
+            Value: !Ref ExposeServerAsLB
+          - Name: PARAM_PREFIX
+            Value: !Ref SSMParamPrefix
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - echo "Install kubectl"
+                - curl -sLo kubectl https://amazon-eks.s3.${Region}.amazonaws.com/1.30.0/2024-06-12/bin/linux/amd64/kubectl
+                - chmod +x kubectl && mv kubectl /usr/local/bin/
+                - echo "Configure kubeconfig"
+                - aws eks update-kubeconfig --name ${CLUSTER_NAME} --region ${AWS_DEFAULT_REGION}
+            build:
+              commands:
+                - set -e
+                - echo "Create namespace if not exists"
+                - kubectl create namespace ${K8S_NS} || true
+                - echo "Install Argo CD (official manifests)"
+                - kubectl apply -n ${K8S_NS} -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+                - echo "Wait for Argo CD server deployment to become available"
+                - kubectl -n ${K8S_NS} rollout status deploy/argocd-server --timeout=5m
+                - |
+                  if [ "${EXPOSE_LB}" = "true" ]; then
+                    echo "Patch argocd-server Service to type=LoadBalancer"
+                    kubectl -n ${K8S_NS} patch svc argocd-server -p '{"spec":{"type":"LoadBalancer"}}' || true
+                  fi
+                - echo "Fetch admin password & store in SSM"
+                - PW=$(kubectl -n ${K8S_NS} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)
+                - aws ssm put-parameter --name "${PARAM_PREFIX}/${CLUSTER_NAME}/argocd/admin-password" --type SecureString --overwrite --value "$PW"
+                - aws ssm add-tags-to-resource --resource-type "Parameter" --resource-id "${PARAM_PREFIX}/${CLUSTER_NAME}/argocd/admin-password" --tags "Key=eks-cluster,Value=${CLUSTER_NAME}" "Key=component,Value=argocd"
+                - echo "Fetch LB hostname (may take time to provision)"
+                - HN=""
+                - for i in {1..30}; do
+                    HN=$(kubectl -n ${K8S_NS} get svc argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true);
+                    if [ -n "$HN" ]; then break; fi;
+                    echo "Waiting for LB hostname..."; sleep 10;
+                  done
+                - [ -n "$HN" ] && aws ssm put-parameter --name "${PARAM_PREFIX}/${CLUSTER_NAME}/argocd/server-hostname" --type String --overwrite --value "$HN" || true
+                - [ -n "$HN" ] && aws ssm add-tags-to-resource --resource-type "Parameter" --resource-id "${PARAM_PREFIX}/${CLUSTER_NAME}/argocd/server-hostname" --tags "Key=eks-cluster,Value=${CLUSTER_NAME}" "Key=component,Value=argocd" || true
+
+  # ---- Lambda (custom resource) to start CodeBuild & wait ----
+  TriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CodeBuildInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ "codebuild:StartBuild", "codebuild:BatchGetBuilds" ]
+                Resource: "*"
+
+  TriggerFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt TriggerRole.Arn
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import json, time, urllib.request, boto3
+          cb = boto3.client('codebuild')
+          def respond(event, status, data=None, reason=None):
+              body = {
+                  'Status': status,
+                  'Reason': reason or 'See CloudWatch Logs',
+                  'PhysicalResourceId': event.get('PhysicalResourceId', 'ArgoBootstrap'),
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data or {}
+              }
+              req = urllib.request.Request(event['ResponseURL'], data=json.dumps(body).encode(), method='PUT')
+              req.add_header('content-type','')
+              urllib.request.urlopen(req)
+          def handler(event, context):
+              try:
+                  t = event['RequestType']
+                  proj = event['ResourceProperties']['ProjectName']
+                  if t in ['Create','Update']:
+                      r = cb.start_build(projectName=proj)
+                      bid = r['build']['id']
+                      while True:
+                          time.sleep(10)
+                          b = cb.batch_get_builds(ids=[bid])['builds'][0]
+                          st = b['buildStatus']
+                          if st in ['SUCCEEDED','FAILED','FAULT','STOPPED','TIMED_OUT']:
+                              break
+                      if st == 'SUCCEEDED':
+                          respond(event, 'SUCCESS', {'BuildId': bid})
+                      else:
+                          respond(event, 'FAILED', reason=f'CodeBuild status: {st}')
+                  else:
+                      respond(event, 'SUCCESS', {'Message': 'No action on Delete'})
+              except Exception as e:
+                  respond(event, 'FAILED', reason=str(e))
+
+  ArgoInstall:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt TriggerFn.Arn
+      ProjectName: !Ref ArgoBootstrapProject
+
+Outputs:
+  ArgoCDNamespace:
+    Value: !Ref KubernetesNamespace
+  SSMAdminPasswordParam:
+    Value: !Sub "${SSMParamPrefix}/${ClusterName}/argocd/admin-password"
+  SSMServerHostnameParam:
+    Value: !Sub "${SSMParamPrefix}/${ClusterName}/argocd/server-hostname"
