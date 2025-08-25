@@ -44,6 +44,7 @@ jobs:
           aws cloudformation validate-template --template-body file://cloudformation/vpc.yaml
           aws cloudformation validate-template --template-body file://cloudformation/eks-cluster.yaml
           aws cloudformation validate-template --template-body file://cloudformation/nodegroup.yaml
+          aws cloudformation validate-template --template-body file://cloudformation/argocd-bootstrap.yaml
 
                 # ---------- PREFLIGHT: VPC ----------
       - name: Preflight - wait if VPC stack is IN_PROGRESS

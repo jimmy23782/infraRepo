@@ -41,8 +41,7 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action:
-                  - eks:DescribeCluster
+                Action: [ eks:DescribeCluster ]
                 Resource: "*"
               - Effect: Allow
                 Action:
@@ -82,43 +81,50 @@ Resources:
             Value: !Ref SSMParamPrefix
       Source:
         Type: NO_SOURCE
-        BuildSpec: !Sub |
+        BuildSpec: |
           version: 0.2
           phases:
             install:
               commands:
+                - set -e
                 - echo "Install kubectl"
-                - curl -sLo kubectl https://amazon-eks.s3.${Region}.amazonaws.com/1.30.0/2024-06-12/bin/linux/amd64/kubectl
+                # Use official EKS bucket in us-west-2, works cross-region
+                - curl -sLo kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.30.0/2024-06-12/bin/linux/amd64/kubectl
                 - chmod +x kubectl && mv kubectl /usr/local/bin/
                 - echo "Configure kubeconfig"
-                - aws eks update-kubeconfig --name ${CLUSTER_NAME} --region ${AWS_DEFAULT_REGION}
+                - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
             build:
               commands:
                 - set -e
                 - echo "Create namespace if not exists"
-                - kubectl create namespace ${K8S_NS} || true
+                - kubectl create namespace "$K8S_NS" || true
                 - echo "Install Argo CD (official manifests)"
-                - kubectl apply -n ${K8S_NS} -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+                - kubectl apply -n "$K8S_NS" -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
                 - echo "Wait for Argo CD server deployment to become available"
-                - kubectl -n ${K8S_NS} rollout status deploy/argocd-server --timeout=5m
+                - kubectl -n "$K8S_NS" rollout status deploy/argocd-server --timeout=5m
                 - |
-                  if [ "${EXPOSE_LB}" = "true" ]; then
+                  if [ "$EXPOSE_LB" = "true" ]; then
                     echo "Patch argocd-server Service to type=LoadBalancer"
-                    kubectl -n ${K8S_NS} patch svc argocd-server -p '{"spec":{"type":"LoadBalancer"}}' || true
+                    kubectl -n "$K8S_NS" patch svc argocd-server -p '{"spec":{"type":"LoadBalancer"}}' || true
                   fi
                 - echo "Fetch admin password & store in SSM"
-                - PW=$(kubectl -n ${K8S_NS} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)
-                - aws ssm put-parameter --name "${PARAM_PREFIX}/${CLUSTER_NAME}/argocd/admin-password" --type SecureString --overwrite --value "$PW"
-                - aws ssm add-tags-to-resource --resource-type "Parameter" --resource-id "${PARAM_PREFIX}/${CLUSTER_NAME}/argocd/admin-password" --tags "Key=eks-cluster,Value=${CLUSTER_NAME}" "Key=component,Value=argocd"
+                - PW=$(kubectl -n "$K8S_NS" get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)
+                - aws ssm put-parameter --name "$PARAM_PREFIX/$CLUSTER_NAME/argocd/admin-password" --type SecureString --overwrite --value "$PW"
+                - aws ssm add-tags-to-resource --resource-type "Parameter" --resource-id "$PARAM_PREFIX/$CLUSTER_NAME/argocd/admin-password" --tags "Key=eks-cluster,Value=$CLUSTER_NAME" "Key=component,Value=argocd"
                 - echo "Fetch LB hostname (may take time to provision)"
                 - HN=""
                 - for i in {1..30}; do
-                    HN=$(kubectl -n ${K8S_NS} get svc argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true);
+                    HN=$(kubectl -n "$K8S_NS" get svc argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true);
                     if [ -n "$HN" ]; then break; fi;
                     echo "Waiting for LB hostname..."; sleep 10;
                   done
-                - [ -n "$HN" ] && aws ssm put-parameter --name "${PARAM_PREFIX}/${CLUSTER_NAME}/argocd/server-hostname" --type String --overwrite --value "$HN" || true
-                - [ -n "$HN" ] && aws ssm add-tags-to-resource --resource-type "Parameter" --resource-id "${PARAM_PREFIX}/${CLUSTER_NAME}/argocd/server-hostname" --tags "Key=eks-cluster,Value=${CLUSTER_NAME}" "Key=component,Value=argocd" || true
+                - |
+                  if [ -n "$HN" ]; then
+                    aws ssm put-parameter --name "$PARAM_PREFIX/$CLUSTER_NAME/argocd/server-hostname" --type String --overwrite --value "$HN"
+                    aws ssm add-tags-to-resource --resource-type "Parameter" --resource-id "$PARAM_PREFIX/$CLUSTER_NAME/argocd/server-hostname" --tags "Key=eks-cluster,Value=$CLUSTER_NAME" "Key=component,Value=argocd"
+                  else
+                    echo "LB hostname not ready yet; you can check later and write it to SSM manually."
+                  fi
 
   # ---- Lambda (custom resource) to start CodeBuild & wait ----
   TriggerRole:
@@ -138,7 +144,7 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [ "codebuild:StartBuild", "codebuild:BatchGetBuilds" ]
+                Action: [ codebuild:StartBuild, codebuild:BatchGetBuilds ]
                 Resource: "*"
 
   TriggerFn:
