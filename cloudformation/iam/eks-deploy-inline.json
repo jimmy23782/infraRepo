@@ -74,9 +74,15 @@
       "Action": ["logs:CreateLogGroup"],
       "Resource": "*"
     },
-    { "Sid": "LogsForBootstrap",
+    {
+      "Sid": "LogsForBootstrap",
       "Effect": "Allow",
-      "Action": ["logs:CreateLogStream","logs:PutLogEvents","logs:DescribeLogStreams"],
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams",
+        "logs:GetLogEvents"
+      ],
       "Resource": [
         "arn:aws:logs:ap-southeast-2:685801731369:log-group:/aws/lambda/demo-eks-argocd-dev-TriggerFn-*:*",
         "arn:aws:logs:ap-southeast-2:685801731369:log-group:/aws/codebuild/argocd-bootstrap-demo-eks-dev:*"
