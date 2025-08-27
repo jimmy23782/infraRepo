@@ -132,6 +132,15 @@ jobs:
           else
             echo "VPC stack not found."
           fi
+          
+      - name: Cleanup SSM params under /eks/<env>
+        run: |
+          PATH_PREFIX="/eks/${{ github.event.inputs.env }}"
+          echo "Deleting SSM parameters under $PATH_PREFIX ..."
+          for name in $(aws ssm get-parameters-by-path --path "$PATH_PREFIX" --recursive --query 'Parameters[].Name' --output text 2>/dev/null); do
+            echo "Deleting $name"
+            aws ssm delete-parameter --name "$name" || true
+          done
 
       - name: Final stack states
         run: |

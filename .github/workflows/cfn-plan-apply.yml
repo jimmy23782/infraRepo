@@ -23,6 +23,7 @@ env:
   VPC_STACK: demo-eks-vpc-dev
   EKS_STACK: demo-eks-eks-dev
   NG_STACK:  demo-eks-nodegroup-dev
+  ARGO_STACK: demo-eks-argocd-dev   # <— new
 
 jobs:
   deploy:
@@ -109,20 +110,38 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
           aws eks wait cluster-active --name "$CLUSTER"
 
+      - name: Preflight - delete stuck ArgoCD create
+        run: |
+          STATUS=$(aws cloudformation describe-stacks --stack-name "${ARGO_STACK}" \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          echo "ArgoCD stack status: $STATUS"
+          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" ]]; then
+            aws cloudformation delete-stack --stack-name "${ARGO_STACK}" || true
+            aws cloudformation wait stack-delete-complete --stack-name "${ARGO_STACK}" || true
+          fi
+
       - name: Bootstrap Argo CD (CFN -> CodeBuild -> Argo install)
         run: |
           aws cloudformation deploy \
             --template-file cloudformation/argocd-bootstrap.yaml \
-            --stack-name demo-eks-argocd-dev \
+            --stack-name "${ARGO_STACK}" \
             --parameter-overrides \
               ClusterName=demo-eks-dev \
               Region=${{ env.AWS_REGION }} \
               KubernetesNamespace=argocd \
               ExposeServerAsLB=true \
-              SSMParamPrefix=/eks \
+              SSMParamPrefix=/eks/${{ env.ENV }} \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
 
+      - name: Show ArgoCD stack failure events (if any)
+        if: failure()
+        run: |
+          aws cloudformation describe-stack-events --stack-name "${ARGO_STACK}" \
+            --max-items 60 \
+            --query "StackEvents[?ends_with(ResourceStatus,'FAILED')].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
+            --output table || true
+            
       # ---------- PREFLIGHT: Nodegroup ----------
       - name: Preflight - delete stuck Nodegroup create
         run: |
