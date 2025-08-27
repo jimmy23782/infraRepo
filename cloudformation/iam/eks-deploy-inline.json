@@ -1,61 +1,38 @@
 {
   "Version": "2012-10-17",
   "Statement": [
-    {
-      "Sid": "IamForClusterAndOIDC",
+    { "Sid": "IamForClusterAndOIDC",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole",
-        "iam:DeleteRole",
-        "iam:UpdateRole",
-        "iam:UpdateAssumeRolePolicy",
-        "iam:AttachRolePolicy",
-        "iam:DetachRolePolicy",
-        "iam:PutRolePolicy",
-        "iam:DeleteRolePolicy",
+        "iam:CreateRole","iam:DeleteRole","iam:UpdateRole","iam:UpdateAssumeRolePolicy",
+        "iam:AttachRolePolicy","iam:DetachRolePolicy",
+        "iam:PutRolePolicy","iam:DeleteRolePolicy",
         "iam:PassRole",
-        "iam:CreateOpenIDConnectProvider",
-        "iam:DeleteOpenIDConnectProvider",
-        "iam:TagRole",
-        "iam:UntagRole",
-        "iam:TagOpenIDConnectProvider",
-        "iam:UntagOpenIDConnectProvider",
+        "iam:CreateOpenIDConnectProvider","iam:DeleteOpenIDConnectProvider",
+        "iam:TagRole","iam:UntagRole",
+        "iam:TagOpenIDConnectProvider","iam:UntagOpenIDConnectProvider",
         "iam:CreateServiceLinkedRole"
       ],
       "Resource": "*"
     },
-    {
-      "Sid": "EksControlPlaneAndNodegroups",
+    { "Sid": "EksControlPlaneAndNodegroups",
       "Effect": "Allow",
       "Action": [
-        "eks:CreateCluster",
-        "eks:DescribeCluster",
-        "eks:DeleteCluster",
-        "eks:TagResource",
-        "eks:UntagResource",
-        "eks:ListTagsForResource",
-        "eks:CreateNodegroup",
-        "eks:DescribeNodegroup",
-        "eks:DeleteNodegroup",
-        "eks:ListNodegroups"
+        "eks:CreateCluster","eks:DescribeCluster","eks:DeleteCluster",
+        "eks:TagResource","eks:UntagResource","eks:ListTagsForResource",
+        "eks:CreateNodegroup","eks:DescribeNodegroup","eks:DeleteNodegroup","eks:ListNodegroups"
       ],
       "Resource": "*"
     },
-    {
-      "Sid": "DescribeNetworking",
+    { "Sid": "DescribeNetworking",
       "Effect": "Allow",
       "Action": [
-        "ec2:DescribeVpcs",
-        "ec2:DescribeSubnets",
-        "ec2:DescribeRouteTables",
-        "ec2:DescribeSecurityGroups",
-        "ec2:DescribeInternetGateways",
-        "ec2:DescribeImages"
+        "ec2:DescribeVpcs","ec2:DescribeSubnets","ec2:DescribeRouteTables",
+        "ec2:DescribeSecurityGroups","ec2:DescribeInternetGateways","ec2:DescribeImages"
       ],
       "Resource": "*"
     },
-    {
-      "Sid": "LambdaCrudForArgoBootstrap",
+    { "Sid": "LambdaCrudAndInvokeForArgoBootstrap",
       "Effect": "Allow",
       "Action": [
         "lambda:CreateFunction",
@@ -66,54 +43,33 @@
         "lambda:AddPermission",
         "lambda:RemovePermission",
         "lambda:CreateEventSourceMapping",
-        "lambda:DeleteEventSourceMapping"
+        "lambda:DeleteEventSourceMapping",
+        "lambda:InvokeFunction"
       ],
       "Resource": "arn:aws:lambda:ap-southeast-2:685801731369:function:demo-eks-argocd-dev-TriggerFn-*"
     },
-    {
-      "Sid": "CodeBuildCrudForArgoBootstrap",
+    { "Sid": "CodeBuildCrudForArgoBootstrap",
       "Effect": "Allow",
       "Action": [
-        "codebuild:CreateProject",
-        "codebuild:UpdateProject",
-        "codebuild:DeleteProject",
-        "codebuild:BatchGetProjects",
-        "codebuild:StartBuild",
-        "codebuild:BatchGetBuilds",
-        "codebuild:ListBuildsForProject"
+        "codebuild:CreateProject","codebuild:UpdateProject","codebuild:DeleteProject",
+        "codebuild:BatchGetProjects","codebuild:StartBuild","codebuild:BatchGetBuilds","codebuild:ListBuildsForProject"
       ],
       "Resource": "arn:aws:codebuild:ap-southeast-2:685801731369:project/argocd-bootstrap-demo-eks-dev"
     },
-    {
-      "Sid": "PassServiceRolesForBootstrap",
+    { "Sid": "PassServiceRolesForBootstrap",
       "Effect": "Allow",
       "Action": "iam:PassRole",
       "Resource": "arn:aws:iam::685801731369:role/demo-eks-argocd-dev-*",
-      "Condition": {
-        "StringEquals": {
-          "iam:PassedToService": [
-            "lambda.amazonaws.com",
-            "codebuild.amazonaws.com"
-          ]
-        }
-      }
+      "Condition": { "StringEquals": { "iam:PassedToService": ["lambda.amazonaws.com","codebuild.amazonaws.com"] } }
     },
-    {
-      "Sid": "LogsCreateGroups",
+    { "Sid": "LogsCreateGroups",
       "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup"
-      ],
+      "Action": ["logs:CreateLogGroup"],
       "Resource": "*"
     },
-    {
-      "Sid": "LogsForBootstrap",
+    { "Sid": "LogsForBootstrap",
       "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogStream",
-        "logs:PutLogEvents",
-        "logs:DescribeLogStreams"
-      ],
+      "Action": ["logs:CreateLogStream","logs:PutLogEvents","logs:DescribeLogStreams"],
       "Resource": [
         "arn:aws:logs:ap-southeast-2:685801731369:log-group:/aws/lambda/demo-eks-argocd-dev-TriggerFn-*:*",
         "arn:aws:logs:ap-southeast-2:685801731369:log-group:/aws/codebuild/argocd-bootstrap-demo-eks-dev:*"
