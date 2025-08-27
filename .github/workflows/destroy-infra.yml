@@ -1,4 +1,5 @@
 name: destroy-infra
+
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +18,7 @@ env:
   VPC_STACK: demo-eks-vpc-${{ github.event.inputs.env }}
   EKS_STACK: demo-eks-eks-${{ github.event.inputs.env }}
   NG_STACK:  demo-eks-nodegroup-${{ github.event.inputs.env }}
+  ARGO_STACK: demo-eks-argocd-${{ github.event.inputs.env }}
 
 jobs:
   destroy:
@@ -34,17 +36,23 @@ jobs:
         run: |
           aws cloudformation describe-stacks --query "Stacks[].{Name:StackName,Status:StackStatus}" --output table || true
 
-      # -------- Optional k8s cleanup (only runs if kubeconfig works) --------
+      - name: Derive names & sanity
+        id: derive
+        run: |
+          set -euo pipefail
+          echo "cluster_name=${{ env.PREFIX }}-${{ github.event.inputs.env }}" >> $GITHUB_OUTPUT
+          echo "argocd_lambda_prefix=${{ env.ARGO_STACK }}-TriggerFn-" >> $GITHUB_OUTPUT
+          echo "argocd_cb_logs=/aws/codebuild/argocd-bootstrap-${{ env.PREFIX }}-${{ github.event.inputs.env }}" >> $GITHUB_OUTPUT
+          echo "argocd_lambda_logs=/aws/lambda/${{ env.ARGO_STACK }}-TriggerFn" >> $GITHUB_OUTPUT
+
+      # -------- Optional k8s cleanup (release ELB/PVCs) --------
       - name: Attempt Kubernetes cleanup (if accessible)
         continue-on-error: true
         run: |
           set -e
-          CLUSTER=$(
-            aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
-            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text 2>/dev/null || echo ""
-          )
-          if [ -n "$CLUSTER" ] && aws eks update-kubeconfig --name "$CLUSTER" --region $AWS_REGION >/dev/null 2>&1; then
-            echo "Kubeconfig set. Deleting LoadBalancer Services/Ingress/PVCs to release AWS resources..."
+          CLUSTER="${{ steps.derive.outputs.cluster_name }}"
+          if aws eks update-kubeconfig --name "$CLUSTER" --region $AWS_REGION >/dev/null 2>&1; then
+            echo "Kubeconfig set. Deleting LB Services/Ingress/PVCs to release AWS resources..."
             kubectl get svc -A | awk '/LoadBalancer/ {print $1, $2}' | xargs -n2 kubectl -n delete svc || true
             kubectl delete ingress --all -A || true
             kubectl delete pvc --all -A || true
@@ -52,33 +60,91 @@ jobs:
             echo "Skipping k8s cleanup (no access)."
           fi
 
+      # -------- ArgoCD bootstrap stack delete + heal --------
+      - name: Delete ArgoCD stack (if exists)
+        run: |
+          if aws cloudformation describe-stacks --stack-name "${{ env.ARGO_STACK }}" >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name "${{ env.ARGO_STACK }}"
+            aws cloudformation wait stack-delete-complete --stack-name "${{ env.ARGO_STACK }}" || true
+          else
+            echo "ArgoCD stack not found."
+          fi
+
+      - name: Heal ArgoCD DELETE_FAILED (retain blockers)
+        if: always()
+        run: |
+          set -euo pipefail
+          STACK="${{ env.ARGO_STACK }}"
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          if [ "$STATUS" = "DELETE_FAILED" ]; then
+            echo "ArgoCD DELETE_FAILED—retaining failed logical resources, then re-delete..."
+            mapfile -t FAILS < <(
+              aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 200 \
+              --query "reverse(StackEvents)[?contains(ResourceStatus,'DELETE_FAILED')].[LogicalResourceId]" \
+              --output text | awk '!seen[$0]++'
+            )
+            if [[ ${#FAILS[@]} -gt 0 ]]; then
+              aws cloudformation delete-stack --stack-name "$STACK" --retain-resources ${FAILS[*]} || true
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+            fi
+          fi
+
+      # -------- Remove EKS AccessEntry (if Argo created one) --------
+      - name: Remove CodeBuild AccessEntry from EKS (if present)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          CLUSTER="${{ steps.derive.outputs.cluster_name }}"
+          # Try to find a CodeBuild service role that matches our stack naming
+          ROLE_ARN=$(aws iam list-roles \
+            --query "Roles[?starts_with(RoleName,'${{ env.ARGO_STACK }}-CodeBuildServiceRole-')].Arn | [0]" \
+            --output text 2>/dev/null || echo "None")
+          if [ -z "$ROLE_ARN" ] || [ "$ROLE_ARN" = "None" ]; then
+            echo "CodeBuild service role not found; skipping EKS AccessEntry cleanup."
+            exit 0
+          fi
+          echo "Disassociating EKS AccessEntry for principal $ROLE_ARN (cluster $CLUSTER) if exists..."
+          # List entries and delete the one that matches our principal
+          for ID in $(aws eks list-access-entries --cluster-name "$CLUSTER" \
+                     --query "accessEntries[].name" --output text 2>/dev/null); do
+            ARN=$(aws eks describe-access-entry --cluster-name "$CLUSTER" --principal-arn "$ID" \
+                  --query "accessEntry.principalArn" --output text 2>/dev/null || echo "")
+            if [ "$ARN" = "$ROLE_ARN" ]; then
+              aws eks delete-access-entry --cluster-name "$CLUSTER" --principal-arn "$ARN" || true
+              echo "Deleted EKS AccessEntry for $ARN"
+            fi
+          done
+
       # -------- Nodegroup delete (with self-heal) --------
       - name: Delete Nodegroup stack
         run: |
-          if aws cloudformation describe-stacks --stack-name "${NG_STACK}" >/dev/null 2>&1; then
-            aws cloudformation delete-stack --stack-name "${NG_STACK}"
-            aws cloudformation wait stack-delete-complete --stack-name "${NG_STACK}" || true
+          if aws cloudformation describe-stacks --stack-name "${{ env.NG_STACK }}" >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name "${{ env.NG_STACK }}"
+            aws cloudformation wait stack-delete-complete --stack-name "${{ env.NG_STACK }}" || true
           else
             echo "Nodegroup stack not found."
           fi
 
-      - name: Heal Nodegroup DELETE_FAILED (retain resources)
+      - name: Heal Nodegroup DELETE_FAILED (retain & clean)
         if: always()
         run: |
-          STATUS=$(aws cloudformation describe-stacks --stack-name "${NG_STACK}" \
+          set -euo pipefail
+          STACK="${{ env.NG_STACK }}"
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
             --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
           if [ "$STATUS" = "DELETE_FAILED" ]; then
             echo "Nodegroup DELETE_FAILED: retaining ManagedNodeGroup & NodeRole then re-deleting..."
-            aws cloudformation delete-stack --stack-name "${NG_STACK}" --retain-resources ManagedNodeGroup NodeRole || true
-            aws cloudformation wait stack-delete-complete --stack-name "${NG_STACK}" || true
-            # try to clean up retained resources if they still exist
-            CLUSTER_NAME=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
-              --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text 2>/dev/null || echo "")
-            if [ -n "$CLUSTER_NAME" ]; then
-              aws eks list-nodegroups --cluster-name "$CLUSTER_NAME" --region $AWS_REGION \
-                --query 'nodegroups[]' --output text | xargs -r -n1 aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --region $AWS_REGION --nodegroup-name
+            aws cloudformation delete-stack --stack-name "$STACK" --retain-resources ManagedNodeGroup NodeRole || true
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+
+            CLUSTER="${{ steps.derive.outputs.cluster_name }}"
+            if [ -n "$CLUSTER" ]; then
+              aws eks list-nodegroups --cluster-name "$CLUSTER" --region $AWS_REGION \
+                --query 'nodegroups[]' --output text | xargs -r -n1 aws eks delete-nodegroup --cluster-name "$CLUSTER" --region $AWS_REGION --nodegroup-name || true
             fi
-            ROLE=$(aws cloudformation describe-stack-resources --stack-name "${NG_STACK}" \
+
+            ROLE=$(aws cloudformation describe-stack-resources --stack-name "$STACK" \
               --logical-resource-id NodeRole --query 'StackResources[0].PhysicalResourceId' --output text 2>/dev/null || echo "")
             if [ -n "$ROLE" ] && aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
               for ARN in $(aws iam list-attached-role-policies --role-name "$ROLE" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); do
@@ -94,9 +160,9 @@ jobs:
       # -------- EKS control plane delete (with self-heal) --------
       - name: Delete EKS stack
         run: |
-          if aws cloudformation describe-stacks --stack-name "${EKS_STACK}" >/dev/null 2>&1; then
-            aws cloudformation delete-stack --stack-name "${EKS_STACK}"
-            aws cloudformation wait stack-delete-complete --stack-name "${EKS_STACK}" || true
+          if aws cloudformation describe-stacks --stack-name "${{ env.EKS_STACK }}" >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name "${{ env.EKS_STACK }}"
+            aws cloudformation wait stack-delete-complete --stack-name "${{ env.EKS_STACK }}" || true
           else
             echo "EKS stack not found."
           fi
@@ -104,13 +170,15 @@ jobs:
       - name: Heal EKS DELETE_FAILED (retain EksClusterRole)
         if: always()
         run: |
-          STATUS=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+          set -euo pipefail
+          STACK="${{ env.EKS_STACK }}"
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
             --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
           if [ "$STATUS" = "DELETE_FAILED" ]; then
             echo "EKS DELETE_FAILED: retaining EksClusterRole then re-deleting..."
-            aws cloudformation delete-stack --stack-name "${EKS_STACK}" --retain-resources EksClusterRole || true
-            aws cloudformation wait stack-delete-complete --stack-name "${EKS_STACK}" || true
-            ROLE=$(aws cloudformation describe-stack-resources --stack-name "${EKS_STACK}" \
+            aws cloudformation delete-stack --stack-name "$STACK" --retain-resources EksClusterRole || true
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+            ROLE=$(aws cloudformation describe-stack-resources --stack-name "$STACK" \
               --logical-resource-id EksClusterRole --query 'StackResources[0].PhysicalResourceId' --output text 2>/dev/null || echo "")
             if [ -n "$ROLE" ] && aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
               for ARN in $(aws iam list-attached-role-policies --role-name "$ROLE" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); do
@@ -126,20 +194,116 @@ jobs:
       # -------- VPC delete --------
       - name: Delete VPC stack
         run: |
-          if aws cloudformation describe-stacks --stack-name "${VPC_STACK}" >/dev/null 2>&1; then
-            aws cloudformation delete-stack --stack-name "${VPC_STACK}"
-            aws cloudformation wait stack-delete-complete --stack-name "${VPC_STACK}" || true
+          if aws cloudformation describe-stacks --stack-name "${{ env.VPC_STACK }}" >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name "${{ env.VPC_STACK }}"
+            aws cloudformation wait stack-delete-complete --stack-name "${{ env.VPC_STACK }}" || true
           else
             echo "VPC stack not found."
           fi
-          
-      - name: Cleanup SSM params under /eks/<env>
+
+      # -------- Orphans cleanup (ELBs, ENIs, EBS, Logs, SSM, CodeBuild/Lambda) --------
+      - name: Delete CloudWatch log groups (Lambda TriggerFn & CodeBuild)
+        continue-on-error: true
         run: |
-          PATH_PREFIX="/eks/${{ github.event.inputs.env }}"
-          echo "Deleting SSM parameters under $PATH_PREFIX ..."
-          for name in $(aws ssm get-parameters-by-path --path "$PATH_PREFIX" --recursive --query 'Parameters[].Name' --output text 2>/dev/null); do
-            echo "Deleting $name"
-            aws ssm delete-parameter --name "$name" || true
+          set -euo pipefail
+          REG="${AWS_REGION}"
+          # Lambda groups
+          for LG in $(aws logs describe-log-groups --region "$REG" \
+              --log-group-name-prefix "${{ steps.derive.outputs.argocd_lambda_logs }}" \
+              --query "logGroups[].logGroupName" --output text 2>/dev/null); do
+            echo "Deleting $LG"
+            aws logs delete-log-group --region "$REG" --log-group-name "$LG" || true
+          done
+          # CodeBuild group
+          CB_LG="${{ steps.derive.outputs.argocd_cb_logs }}"
+          aws logs delete-log-group --region "$REG" --log-group-name "$CB_LG" || true
+
+      - name: Delete CodeBuild project & Lambda functions (if any)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          REG="${AWS_REGION}"
+          CLUSTER="${{ steps.derive.outputs.cluster_name }}"
+          PROJ="argocd-bootstrap-${CLUSTER}"
+          if aws codebuild batch-get-projects --names "$PROJ" --region "$REG" >/dev/null 2>&1; then
+            echo "Deleting CodeBuild project $PROJ"
+            aws codebuild delete-project --name "$PROJ" --region "$REG" || true
+          fi
+          # Delete any TriggerFn Lambdas with random suffixes
+          for FN in $(aws lambda list-functions --region "$REG" \
+              --query "Functions[?starts_with(FunctionName, '${{ env.ARGO_STACK }}-TriggerFn-')].FunctionName" \
+              --output text 2>/dev/null); do
+            echo "Deleting Lambda $FN"
+            aws lambda delete-function --function-name "$FN" --region "$REG" || true
+          done
+
+      - name: Cleanup SSM params under /eks/<env> and /eks/<cluster>
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          REG="${AWS_REGION}"
+          ENV_PATH="/eks/${{ github.event.inputs.env }}"
+          CLUSTER_PATH="/eks/${{ steps.derive.outputs.cluster_name }}"
+          for PFX in "$ENV_PATH" "$CLUSTER_PATH"; do
+            echo "Deleting SSM parameters under $PFX ..."
+            for name in $(aws ssm get-parameters-by-path --region "$REG" --path "$PFX" --recursive --query 'Parameters[].Name' --output text 2>/dev/null); do
+              echo "Deleting $name"
+              aws ssm delete-parameter --region "$REG" --name "$name" || true
+            done
+          done
+
+      - name: Nuke stray ELBv2 / Classic ELB with cluster tag (best-effort)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          REG="${AWS_REGION}"
+          CLUSTER="${{ steps.derive.outputs.cluster_name }}"
+          # ALB/NLB (ELBv2)
+          for ARN in $(aws elbv2 describe-load-balancers --region "$REG" \
+                --query "LoadBalancers[].LoadBalancerArn" --output text 2>/dev/null); do
+            TAG=$(aws elbv2 describe-tags --resource-arns $ARN --region "$REG" \
+                  --query "TagDescriptions[0].Tags[?Key=='kubernetes.io/cluster/${CLUSTER}'].Value | [0]" --output text 2>/dev/null || echo "")
+            if [ "$TAG" = "owned" ] || [ "$TAG" = "shared" ]; then
+              echo "Deleting ELBv2 $ARN"
+              aws elbv2 delete-load-balancer --load-balancer-arn "$ARN" --region "$REG" || true
+            fi
+          done
+          # Classic ELB
+          for NAME in $(aws elb describe-load-balancers --region "$REG" \
+                --query "LoadBalancerDescriptions[].LoadBalancerName" --output text 2>/dev/null); do
+            TAG=$(aws elb describe-tags --load-balancer-names "$NAME" --region "$REG" \
+                  --query "TagDescriptions[0].Tags[?Key=='kubernetes.io/cluster/${CLUSTER}'].Value | [0]" --output text 2>/dev/null || echo "")
+            if [ "$TAG" = "owned" ] || [ "$TAG" = "shared" ]; then
+              echo "Deleting classic ELB $NAME"
+              aws elb delete-load-balancer --load-balancer-name "$NAME" --region "$REG" || true
+            fi
+          done
+
+      - name: Nuke stray ENIs & EBS tagged for the cluster (best-effort)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          REG="${AWS_REGION}"
+          CLUSTER="${{ steps.derive.outputs.cluster_name }}"
+          # ENIs (detached only)
+          for ENI in $(aws ec2 describe-network-interfaces --region "$REG" \
+                --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned,shared" \
+                          "Name=status,Values=available" \
+                --query "NetworkInterfaces[].NetworkInterfaceId" --output text 2>/dev/null); do
+            echo "Deleting ENI $ENI"
+            aws ec2 delete-network-interface --network-interface-id "$ENI" --region "$REG" || true
+          done
+          # EBS
+          for VOL in $(aws ec2 describe-volumes --region "$REG" \
+                --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned,shared" \
+                --query "Volumes[].VolumeId" --output text 2>/dev/null); do
+            STATE=$(aws ec2 describe-volumes --region "$REG" --volume-ids "$VOL" --query "Volumes[0].State" --output text)
+            if [ "$STATE" = "available" ]; then
+              echo "Deleting EBS volume $VOL"
+              aws ec2 delete-volume --volume-id "$VOL" --region "$REG" || true
+            else
+              echo "Skipping EBS $VOL (state=$STATE)"
+            fi
           done
 
       - name: Final stack states
