@@ -48,13 +48,20 @@
       ],
       "Resource": "arn:aws:lambda:ap-southeast-2:685801731369:function:demo-eks-argocd-dev-TriggerFn-*"
     },
-    { "Sid": "CodeBuildCrudForArgoBootstrap",
+      {
+      "Sid": "CodeBuildCrudForArgoBootstrap",
       "Effect": "Allow",
       "Action": [
-        "codebuild:CreateProject","codebuild:UpdateProject","codebuild:DeleteProject",
-        "codebuild:BatchGetProjects","codebuild:StartBuild","codebuild:BatchGetBuilds","codebuild:ListBuildsForProject"
+        "codebuild:CreateProject",
+        "codebuild:UpdateProject",
+        "codebuild:DeleteProject",
+        "codebuild:BatchGetProjects",
+        "codebuild:StartBuild",
+        "codebuild:BatchGetBuilds",
+        "codebuild:ListBuildsForProject",
+        "codebuild:ListBuilds"
       ],
-      "Resource": "arn:aws:codebuild:ap-southeast-2:685801731369:project/argocd-bootstrap-demo-eks-dev"
+      "Resource": "*"
     },
     { "Sid": "PassServiceRolesForBootstrap",
       "Effect": "Allow",

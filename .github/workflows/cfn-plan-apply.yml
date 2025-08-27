@@ -190,6 +190,41 @@ jobs:
             --query "StackEvents[?ends_with(ResourceStatus,'FAILED')].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
             --output table || true
 
+      - name: Show Lambda logs for Argo custom resource (auto-discover)
+        if: failure()
+        run: |
+          set -euo pipefail
+          REG="${AWS_REGION}"
+          FN=$(aws cloudformation list-stack-resources \
+            --region "$REG" \
+            --stack-name "${ARGO_STACK}" \
+            --query "StackResourceSummaries[?LogicalResourceId=='TriggerFn'].PhysicalResourceId | [0]" \
+            --output text 2>/dev/null || echo "None")
+
+          if [ -z "$FN" ] || [ "$FN" = "None" ]; then
+            echo "No TriggerFn found in stack ${ARGO_STACK}."
+            exit 0
+          fi
+          echo "Trigger function: $FN"
+
+          LG="/aws/lambda/${FN}"
+          LS=$(aws logs describe-log-streams \
+            --region "$REG" \
+            --log-group-name "$LG" \
+            --order-by LastEventTime --descending --max-items 1 \
+            --query 'logStreams[0].logStreamName' --output text 2>/dev/null || echo "None")
+
+          if [ -z "$LS" ] || [ "$LS" = "None" ]; then
+            echo "No CloudWatch log stream yet for $FN"
+            exit 0
+          fi
+          echo "Log stream: $LS"
+
+          echo "--- LAMBDA LOG (last 200 lines) ---"
+          aws logs get-log-events --region "$REG" \
+            --log-group-name "$LG" --log-stream-name "$LS" \
+            --limit 10000 --output text | sed -E 's/^.*\t//' | tail -n 200
+            
       - name: Show CodeBuild logs for Argo bootstrap (auto-discover)
         if: failure()
         run: |
