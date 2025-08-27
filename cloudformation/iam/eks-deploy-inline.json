@@ -90,6 +90,19 @@
       "eks:UpdateNodegroupVersion"
     ],
     "Resource": "*"
+  },
+    {
+    "Sid": "EksAccessEntryAdmin",
+    "Effect": "Allow",
+    "Action": [
+      "eks:CreateAccessEntry",
+      "eks:DeleteAccessEntry",
+      "eks:AssociateAccessPolicy",
+      "eks:DisassociateAccessPolicy",
+      "eks:DescribeAccessEntry",
+      "eks:ListAccessEntries"
+    ],
+    "Resource": "*"
   }
   ]
 }
