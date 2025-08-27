@@ -100,7 +100,9 @@
       "eks:AssociateAccessPolicy",
       "eks:DisassociateAccessPolicy",
       "eks:DescribeAccessEntry",
-      "eks:ListAccessEntries"
+      "eks:ListAccessEntries",
+      "eks:ListAssociatedAccessPolicies", 
+      "eks:ListAccessPolicies"  
     ],
     "Resource": "*"
   }
