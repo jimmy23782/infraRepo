@@ -31,6 +31,71 @@
         "ec2:DescribeSecurityGroups","ec2:DescribeInternetGateways","ec2:DescribeImages"
       ],
       "Resource": "*"
+    },
+     /* 1) Lambda used by the Argo bootstrap "TriggerFn" */
+    {
+      "Sid": "LambdaCrudForArgoBootstrap",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:DeleteFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:GetFunction",
+        "lambda:AddPermission",
+        "lambda:RemovePermission",
+        "lambda:CreateEventSourceMapping",
+        "lambda:DeleteEventSourceMapping"
+      ],
+      "Resource": "arn:aws:lambda:ap-southeast-2:685801731369:function:demo-eks-argocd-dev-TriggerFn-*"
+    },
+
+    /* 2) CodeBuild project created by the bootstrap */
+    {
+      "Sid": "CodeBuildCrudForArgoBootstrap",
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:CreateProject",
+        "codebuild:UpdateProject",
+        "codebuild:DeleteProject",
+        "codebuild:BatchGetProjects",
+        "codebuild:StartBuild",
+        "codebuild:BatchGetBuilds",
+        "codebuild:ListBuildsForProject"
+      ],
+      "Resource": "arn:aws:codebuild:ap-southeast-2:685801731369:project/argocd-bootstrap-demo-eks-dev"
+    },
+
+    /* 3) PassRole to the service roles your CFN template references */
+    {
+      "Sid": "PassServiceRolesForBootstrap",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::685801731369:role/demo-eks-argocd-dev-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "lambda.amazonaws.com",
+            "codebuild.amazonaws.com"
+          ]
+        }
+      }
+    },
+
+    /* 4) CloudWatch Logs for Lambda/CodeBuild runtime */
+    {
+      "Sid": "LogsForBootstrap",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": [
+        "arn:aws:logs:ap-southeast-2:685801731369:log-group:/aws/lambda/demo-eks-argocd-dev-TriggerFn-*:*",
+        "arn:aws:logs:ap-southeast-2:685801731369:log-group:/aws/codebuild/argocd-bootstrap-demo-eks-dev:*"
+      ]
     }
   ]
 }
