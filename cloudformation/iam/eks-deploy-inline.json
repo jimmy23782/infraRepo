@@ -1,38 +1,59 @@
 {
   "Version": "2012-10-17",
   "Statement": [
-    { "Sid": "IamForClusterAndOIDC",
+    {
+      "Sid": "IamForClusterAndOIDC",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole","iam:DeleteRole","iam:UpdateRole","iam:UpdateAssumeRolePolicy",
-        "iam:AttachRolePolicy","iam:DetachRolePolicy",
-        "iam:PutRolePolicy","iam:DeleteRolePolicy",
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:UpdateRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
         "iam:PassRole",
-        "iam:CreateOpenIDConnectProvider","iam:DeleteOpenIDConnectProvider",
-        "iam:TagRole","iam:UntagRole",
-        "iam:TagOpenIDConnectProvider","iam:UntagOpenIDConnectProvider",
+        "iam:CreateOpenIDConnectProvider",
+        "iam:DeleteOpenIDConnectProvider",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:TagOpenIDConnectProvider",
+        "iam:UntagOpenIDConnectProvider",
         "iam:CreateServiceLinkedRole"
       ],
       "Resource": "*"
     },
-    { "Sid": "EksControlPlaneAndNodegroups",
+    {
+      "Sid": "EksControlPlaneAndNodegroups",
       "Effect": "Allow",
       "Action": [
-        "eks:CreateCluster","eks:DescribeCluster","eks:DeleteCluster",
-        "eks:TagResource","eks:UntagResource","eks:ListTagsForResource",
-        "eks:CreateNodegroup","eks:DescribeNodegroup","eks:DeleteNodegroup","eks:ListNodegroups"
+        "eks:CreateCluster",
+        "eks:DescribeCluster",
+        "eks:DeleteCluster",
+        "eks:TagResource",
+        "eks:UntagResource",
+        "eks:ListTagsForResource",
+        "eks:CreateNodegroup",
+        "eks:DescribeNodegroup",
+        "eks:DeleteNodegroup",
+        "eks:ListNodegroups"
       ],
       "Resource": "*"
     },
-    { "Sid": "DescribeNetworking",
+    {
+      "Sid": "DescribeNetworking",
       "Effect": "Allow",
       "Action": [
-        "ec2:DescribeVpcs","ec2:DescribeSubnets","ec2:DescribeRouteTables",
-        "ec2:DescribeSecurityGroups","ec2:DescribeInternetGateways","ec2:DescribeImages"
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeInternetGateways",
+        "ec2:DescribeImages"
       ],
       "Resource": "*"
     },
-     /* 1) Lambda used by the Argo bootstrap "TriggerFn" */
     {
       "Sid": "LambdaCrudForArgoBootstrap",
       "Effect": "Allow",
@@ -49,8 +70,6 @@
       ],
       "Resource": "arn:aws:lambda:ap-southeast-2:685801731369:function:demo-eks-argocd-dev-TriggerFn-*"
     },
-
-    /* 2) CodeBuild project created by the bootstrap */
     {
       "Sid": "CodeBuildCrudForArgoBootstrap",
       "Effect": "Allow",
@@ -65,8 +84,6 @@
       ],
       "Resource": "arn:aws:codebuild:ap-southeast-2:685801731369:project/argocd-bootstrap-demo-eks-dev"
     },
-
-    /* 3) PassRole to the service roles your CFN template references */
     {
       "Sid": "PassServiceRolesForBootstrap",
       "Effect": "Allow",
@@ -81,13 +98,18 @@
         }
       }
     },
-
-    /* 4) CloudWatch Logs for Lambda/CodeBuild runtime */
+    {
+      "Sid": "LogsCreateGroups",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup"
+      ],
+      "Resource": "*"
+    },
     {
       "Sid": "LogsForBootstrap",
       "Effect": "Allow",
       "Action": [
-        "logs:CreateLogGroup",
         "logs:CreateLogStream",
         "logs:PutLogEvents",
         "logs:DescribeLogStreams"
