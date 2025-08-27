@@ -11,6 +11,10 @@ on:
       - "cloudformation/**"
       - ".github/workflows/cfn-plan-apply.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   id-token: write
   contents: read
@@ -22,8 +26,8 @@ env:
   PREFIX: demo-eks
   VPC_STACK: demo-eks-vpc-dev
   EKS_STACK: demo-eks-eks-dev
-  NG_STACK:  demo-eks-nodegroup-dev
-  ARGO_STACK: demo-eks-argocd-dev   # <— new
+  NG_STACK: demo-eks-nodegroup-dev
+  ARGO_STACK: demo-eks-argocd-dev
 
 jobs:
   deploy:
@@ -40,6 +44,12 @@ jobs:
           role-to-assume: arn:aws:iam::685801731369:role/github-oidc-deployer
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Set AWS CLI behavior
+        run: |
+          echo "AWS_PAGER=" >> $GITHUB_ENV
+          echo "AWS_RETRY_MODE=standard" >> $GITHUB_ENV
+          echo "AWS_MAX_ATTEMPTS=2" >> $GITHUB_ENV
+
       - name: Validate CFN templates
         run: |
           aws cloudformation validate-template --template-body file://cloudformation/vpc.yaml
@@ -47,7 +57,7 @@ jobs:
           aws cloudformation validate-template --template-body file://cloudformation/nodegroup.yaml
           aws cloudformation validate-template --template-body file://cloudformation/argocd-bootstrap.yaml
 
-                # ---------- PREFLIGHT: VPC ----------
+      # ---------- PREFLIGHT: VPC ----------
       - name: Preflight - wait if VPC stack is IN_PROGRESS
         run: |
           set -e
@@ -55,24 +65,18 @@ jobs:
             --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
           echo "VPC stack status: $STATUS"
           case "$STATUS" in
-            CREATE_IN_PROGRESS)
-              aws cloudformation wait stack-create-complete --stack-name "${VPC_STACK}"
-              ;;
-            UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS)
-              aws cloudformation wait stack-update-complete --stack-name "${VPC_STACK}"
-              ;;
-            DELETE_IN_PROGRESS)
-              aws cloudformation wait stack-delete-complete --stack-name "${VPC_STACK}"
-              ;;
+            CREATE_IN_PROGRESS) aws cloudformation wait stack-create-complete --stack-name "${VPC_STACK}" ;;
+            UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS) aws cloudformation wait stack-update-complete --stack-name "${VPC_STACK}" ;;
+            DELETE_IN_PROGRESS) aws cloudformation wait stack-delete-complete --stack-name "${VPC_STACK}" ;;
             *) echo "No wait needed." ;;
           esac
-          
+
       # ---------- VPC ----------
       - name: Create/Update VPC stack
         run: |
           aws cloudformation deploy \
             --template-file cloudformation/vpc.yaml \
-            --stack-name $VPC_STACK \
+            --stack-name "${VPC_STACK}" \
             --parameter-overrides file://cloudformation/parameters/${ENV}/vpc.json \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
@@ -81,17 +85,27 @@ jobs:
         id: vpc
         run: |
           OUT=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" --query "Stacks[0].Outputs")
-          echo "public_subnets=$(echo "$OUT" | jq -r '.[] | select(.OutputKey=="PublicSubnetIds").OutputValue')" >> $GITHUB_OUTPUT
+          echo "public_subnets=$(echo "$OUT" | jq -r '.[] | select(.OutputKey==\"PublicSubnetIds\").OutputValue')" >> $GITHUB_OUTPUT
 
       # ---------- PREFLIGHT: EKS ----------
-      - name: Preflight - delete stuck EKS create
+      - name: Preflight - heal/delete stuck EKS stack
         run: |
-          STATUS=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+          set -euo pipefail
+          STACK="${EKS_STACK}"
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
             --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
           echo "EKS stack status: $STATUS"
-          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" ]]; then
-            aws cloudformation delete-stack --stack-name "${EKS_STACK}" || true
-            aws cloudformation wait stack-delete-complete --stack-name "${EKS_STACK}" || true
+          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" || "$STATUS" == "DELETE_FAILED" ]]; then
+            aws cloudformation delete-stack --stack-name "$STACK" || true
+            if ! aws cloudformation wait stack-delete-complete --stack-name "$STACK"; then
+              mapfile -t FAILS < <(
+                aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 200 \
+                  --query "reverse(StackEvents)[?contains(ResourceStatus,'DELETE_FAILED')].[LogicalResourceId]" \
+                  --output text | awk '!seen[$0]++'
+              )
+              [[ ${#FAILS[@]} -gt 0 ]] && aws cloudformation delete-stack --stack-name "$STACK" --retain-resources ${FAILS[*]} || true
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+            fi
           fi
 
       - name: Create/Update EKS cluster
@@ -110,14 +124,32 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
           aws eks wait cluster-active --name "$CLUSTER"
 
-      - name: Preflight - delete stuck ArgoCD create
+      # ---------- PREFLIGHT: ArgoCD ----------
+      - name: Preflight - heal/delete stuck ArgoCD stack
         run: |
-          STATUS=$(aws cloudformation describe-stacks --stack-name "${ARGO_STACK}" \
+          set -euo pipefail
+          STACK="${ARGO_STACK}"
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
             --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
           echo "ArgoCD stack status: $STATUS"
-          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" ]]; then
-            aws cloudformation delete-stack --stack-name "${ARGO_STACK}" || true
-            aws cloudformation wait stack-delete-complete --stack-name "${ARGO_STACK}" || true
+          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" || "$STATUS" == "DELETE_FAILED" ]]; then
+            echo "Attempting delete of $STACK ..."
+            aws cloudformation delete-stack --stack-name "$STACK" || true
+            if ! aws cloudformation wait stack-delete-complete --stack-name "$STACK"; then
+              echo "Delete failed; retaining blockers..."
+              mapfile -t FAILS < <(
+                aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 200 \
+                  --query "reverse(StackEvents)[?contains(ResourceStatus,'DELETE_FAILED')].[LogicalResourceId]" \
+                  --output text | awk '!seen[$0]++'
+              )
+              echo "Retaining: ${FAILS[*]:-<none>}"
+              if [[ "${#FAILS[@]}" -gt 0 ]]; then
+                aws cloudformation delete-stack --stack-name "$STACK" --retain-resources ${FAILS[*]} || true
+                aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+              fi
+            fi
+          else
+            echo "No preflight action needed."
           fi
 
       - name: Bootstrap Argo CD (CFN -> CodeBuild -> Argo install)
@@ -141,16 +173,26 @@ jobs:
             --max-items 60 \
             --query "StackEvents[?ends_with(ResourceStatus,'FAILED')].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
             --output table || true
-            
+
       # ---------- PREFLIGHT: Nodegroup ----------
-      - name: Preflight - delete stuck Nodegroup create
+      - name: Preflight - heal/delete stuck Nodegroup stack
         run: |
-          STATUS=$(aws cloudformation describe-stacks --stack-name "${NG_STACK}" \
+          set -euo pipefail
+          STACK="${NG_STACK}"
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
             --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
           echo "Nodegroup stack status: $STATUS"
-          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" ]]; then
-            aws cloudformation delete-stack --stack-name "${NG_STACK}" || true
-            aws cloudformation wait stack-delete-complete --stack-name "${NG_STACK}" || true
+          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" || "$STATUS" == "DELETE_FAILED" ]]; then
+            aws cloudformation delete-stack --stack-name "$STACK" || true
+            if ! aws cloudformation wait stack-delete-complete --stack-name "$STACK"; then
+              mapfile -t FAILS < <(
+                aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 200 \
+                  --query "reverse(StackEvents)[?contains(ResourceStatus,'DELETE_FAILED')].[LogicalResourceId]" \
+                  --output text | awk '!seen[$0]++'
+              )
+              [[ ${#FAILS[@]} -gt 0 ]] && aws cloudformation delete-stack --stack-name "$STACK" --retain-resources ${FAILS[*]} || true
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+            fi
           fi
 
       - name: Create/Update node group
