@@ -74,6 +74,22 @@
         "arn:aws:logs:ap-southeast-2:685801731369:log-group:/aws/lambda/demo-eks-argocd-dev-TriggerFn-*:*",
         "arn:aws:logs:ap-southeast-2:685801731369:log-group:/aws/codebuild/argocd-bootstrap-demo-eks-dev:*"
       ]
-    }
+    },
+    {
+    "Sid": "EksUpdateAndDescribe",
+    "Effect": "Allow",
+    "Action": [
+      "eks:UpdateClusterConfig",
+      "eks:UpdateClusterVersion",
+      "eks:DescribeUpdate",
+      "eks:UpdateAddon",
+      "eks:CreateAddon",
+      "eks:DeleteAddon",
+      "eks:ListAddons",
+      "eks:UpdateNodegroupConfig",
+      "eks:UpdateNodegroupVersion"
+    ],
+    "Resource": "*"
+  }
   ]
 }
