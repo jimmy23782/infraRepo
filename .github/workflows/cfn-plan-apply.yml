@@ -190,6 +190,31 @@ jobs:
             --query "StackEvents[?ends_with(ResourceStatus,'FAILED')].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
             --output table || true
 
+      - name: Show CodeBuild logs for Argo bootstrap (if any)
+        if: failure()
+        run: |
+          set -euo pipefail
+          PROJ="argocd-bootstrap-demo-eks-dev"
+          BID=$(aws codebuild list-builds-for-project --project-name "$PROJ" --sort-order DESC --max-items 1 --query 'ids[0]' --output text 2>/dev/null || echo "None")
+          if [ "$BID" = "None" ] || [ -z "$BID" ]; then
+            echo "No builds found for $PROJ"
+            exit 0
+          fi
+          echo "Latest build: $BID"
+          aws codebuild batch-get-builds --ids "$BID" \
+            --query 'builds[0].{Status:buildStatus,CurrentPhase:currentPhase,LogGroup:logs.groupName,LogStream:logs.streamName,Env:image,Phases:phases}' \
+            --output table || true
+          LG=$(aws codebuild batch-get-builds --ids "$BID" --query 'builds[0].logs.groupName' --output text)
+          LS=$(aws codebuild batch-get-builds --ids "$BID" --query 'builds[0].logs.streamName' --output text)
+          if [ "$LG" = "None" ] || [ -z "$LG" ] || [ "$LS" = "None" ] || [ -z "$LS" ]; then
+            echo "No CloudWatch Logs attached to this build."
+            exit 0
+          fi
+          echo "--- HEAD (first 100 lines) ---"
+          aws logs get-log-events --log-group-name "$LG" --log-stream-name "$LS" --limit 100 --output text | sed -E 's/^.*\t//'
+          echo "--- TAIL (last 100 lines) ---"
+          aws logs get-log-events --log-group-name "$LG" --log-stream-name "$LS" --limit 10000 --output text | sed -E 's/^.*\t//' | tail -n 100
+
       # ---------- PREFLIGHT: Nodegroup ----------
       - name: Preflight - heal/delete stuck Nodegroup stack
         run: |
