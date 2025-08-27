@@ -84,8 +84,24 @@ jobs:
       - name: Get VPC outputs
         id: vpc
         run: |
-          OUT=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" --query "Stacks[0].Outputs")
-          echo "public_subnets=$(echo "$OUT" | jq -r '.[] | select(.OutputKey==\"PublicSubnetIds\").OutputValue')" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          VAL=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='PublicSubnetIds'].OutputValue | [0]" \
+            --output text)
+
+          echo "Resolved PublicSubnetIds from ${VPC_STACK}: $VAL"
+
+          # normalize & validate
+          VAL_CLEAN=$(echo "$VAL" | tr -d '[:space:]')
+          if [ -z "$VAL_CLEAN" ] || [ "$VAL_CLEAN" = "None" ]; then
+            echo "ERROR: Output 'PublicSubnetIds' is missing/empty on stack ${VPC_STACK}" >&2
+            echo "All outputs for debugging:" >&2
+            aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
+              --query "Stacks[0].Outputs" --output table || true
+            exit 1
+          fi
+
+          echo "public_subnets=$VAL_CLEAN" >> "$GITHUB_OUTPUT"
 
       # ---------- PREFLIGHT: EKS ----------
       - name: Preflight - heal/delete stuck EKS stack
