@@ -91,7 +91,6 @@ jobs:
 
           echo "Resolved PublicSubnetIds from ${VPC_STACK}: $VAL"
 
-          # normalize & validate
           VAL_CLEAN=$(echo "$VAL" | tr -d '[:space:]')
           if [ -z "$VAL_CLEAN" ] || [ "$VAL_CLEAN" = "None" ]; then
             echo "ERROR: Output 'PublicSubnetIds' is missing/empty on stack ${VPC_STACK}" >&2
@@ -140,33 +139,7 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
           aws eks wait cluster-active --name "$CLUSTER"
 
-      # ---------- PREFLIGHT: ArgoCD ----------
-      - name: Preflight - heal/delete stuck ArgoCD stack
-        run: |
-          set -euo pipefail
-          STACK="${ARGO_STACK}"
-          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
-            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
-          echo "ArgoCD stack status: $STATUS"
-          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" || "$STATUS" == "DELETE_FAILED" ]]; then
-            echo "Attempting delete of $STACK ..."
-            aws cloudformation delete-stack --stack-name "$STACK" || true
-            if ! aws cloudformation wait stack-delete-complete --stack-name "$STACK"; then
-              echo "Delete failed; retaining blockers..."
-              mapfile -t FAILS < <(
-                aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 200 \
-                  --query "reverse(StackEvents)[?contains(ResourceStatus,'DELETE_FAILED')].[LogicalResourceId]" \
-                  --output text | awk '!seen[$0]++'
-              )
-              echo "Retaining: ${FAILS[*]:-<none>}"
-              if [[ "${#FAILS[@]}" -gt 0 ]]; then
-                aws cloudformation delete-stack --stack-name "$STACK" --retain-resources ${FAILS[*]} || true
-                aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
-              fi
-            fi
-          else
-            echo "No preflight action needed."
-          fi
+      # ---------- Make sure EKS Access API is enabled BEFORE touching Argo ----------
       - name: Ensure EKS access API is enabled (required for AccessEntry)
         run: |
           set -euo pipefail
@@ -180,12 +153,62 @@ jobs:
             aws eks update-cluster-config --name "$CLUSTER" \
               --access-config authenticationMode=API_AND_CONFIG_MAP
             aws eks wait cluster-active --name "$CLUSTER"
-            echo "Auth mode set. Verifying…"
+            echo "Auth mode set to:"
             aws eks describe-cluster --name "$CLUSTER" \
               --query 'cluster.accessConfig.authenticationMode' --output text
           else
             echo "Auth mode already OK."
           fi
+
+      # ---------- PREFLIGHT: ArgoCD (heal/delete stuck stack; purge AccessEntry if needed) ----------
+      - name: Preflight - heal/delete stuck ArgoCD stack (fix AccessEntry first)
+        run: |
+          set -euo pipefail
+          STACK="${ARGO_STACK}"
+          CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          echo "ArgoCD stack status: $STATUS"
+
+          if [[ "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" || "$STATUS" == "DELETE_FAILED" ]]; then
+            echo "Attempting delete of $STACK ..."
+            aws cloudformation delete-stack --stack-name "$STACK" || true
+            if ! aws cloudformation wait stack-delete-complete --stack-name "$STACK"; then
+              echo "Delete failed; AccessEntry likely blocking. Purging it directly…"
+
+              ROLE_NAME=$(aws cloudformation describe-stack-resources --stack-name "$STACK" \
+                --logical-resource-id CodeBuildServiceRole \
+                --query 'StackResources[0].PhysicalResourceId' --output text 2>/dev/null || echo "")
+
+              if [ -n "$ROLE_NAME" ] && [ "$ROLE_NAME" != "None" ]; then
+                PRINCIPAL_ARN=$(aws iam get-role --role-name "$ROLE_NAME" \
+                  --query 'Role.Arn' --output text 2>/dev/null || echo "")
+                if [ -n "$PRINCIPAL_ARN" ] && [ "$PRINCIPAL_ARN" != "None" ]; then
+                  echo "Deleting EKS AccessEntry for principal: $PRINCIPAL_ARN"
+                  aws eks delete-access-entry --cluster-name "$CLUSTER" --principal-arn "$PRINCIPAL_ARN" || true
+                fi
+              fi
+
+              for P in $(aws eks list-access-entries --cluster-name "$CLUSTER" \
+                          --query 'accessEntries[].principalArn' --output text 2>/dev/null || echo ""); do
+                case "$P" in
+                  arn:aws:iam::*:role/*CodeBuildServiceRole*)
+                    echo "Also removing lingering AccessEntry: $P"
+                    aws eks delete-access-entry --cluster-name "$CLUSTER" --principal-arn "$P" || true
+                    ;;
+                esac
+              done
+
+              echo "Retrying delete of $STACK after AccessEntry cleanup…"
+              aws cloudformation delete-stack --stack-name "$STACK" || true
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+            fi
+          else
+            echo "No preflight action needed."
+          fi
+
+      # ---------- ArgoCD bootstrap (CFN -> Lambda -> CodeBuild) ----------
       - name: Bootstrap Argo CD (CFN -> CodeBuild -> Argo install)
         run: |
           aws cloudformation deploy \
@@ -261,11 +284,9 @@ jobs:
           fi
           echo "Project: $PROJ"
 
-          # show service role + env (useful for RBAC/perm debugging)
           aws codebuild batch-get-projects --region "$REG" --names "$PROJ" \
             --query 'projects[0].{ServiceRole:serviceRole,Env:environment.environmentVariables}' --output table || true
 
-          # get latest build id with a short retry
           BID="None"
           for i in {1..5}; do
             BID=$(aws codebuild list-builds-for-project \
@@ -285,7 +306,6 @@ jobs:
           fi
           echo "Latest build: $BID"
 
-          # show phases and log pointers
           aws codebuild batch-get-builds --region "$REG" --ids "$BID" \
             --query 'builds[0].{Status:buildStatus,CurrentPhase:currentPhase,Image:environment.image,ServiceRole:serviceRole,Phases:phases,LogGroup:logs.groupName,LogStream:logs.streamName}' \
             --output table || true
