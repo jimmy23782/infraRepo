@@ -120,8 +120,17 @@ Resources:
                 - kubectl create namespace "$K8S_NS" || true
                 - echo "Install Argo CD (official manifests)"
                 - kubectl apply -n "$K8S_NS" -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-                - echo "Wait for Argo CD server deployment to become available"
-                - kubectl -n "$K8S_NS" rollout status deploy/argocd-server --timeout=5m
+                - echo "Wait for Argo CD server deployment to become available (up to 15 minutes)"
+                - |
+                  for i in {1..30}; do
+                    if kubectl -n "$K8S_NS" rollout status deploy/argocd-server --timeout=30s; then
+                      echo "Argo CD server is ready"
+                      break
+                    else
+                      echo "Argo CD server not ready yet... retrying ($i/30)"
+                      sleep 30
+                    fi
+                  done
                 - |
                   if [ "$EXPOSE_LB" = "true" ]; then
                     echo "Patch argocd-server Service to type=LoadBalancer"
