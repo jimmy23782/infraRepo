@@ -167,25 +167,25 @@ jobs:
           else
             echo "No preflight action needed."
           fi
-        - name: Ensure EKS access API is enabled (required for AccessEntry)
-          run: |
-            set -euo pipefail
-            CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
-              --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
-            MODE=$(aws eks describe-cluster --name "$CLUSTER" \
-              --query 'cluster.accessConfig.authenticationMode' --output text 2>/dev/null || echo "UNKNOWN")
-            echo "Current auth mode: $MODE"
-            if [ "$MODE" != "API" ] && [ "$MODE" != "API_AND_CONFIG_MAP" ]; then
-              echo "Updating cluster auth mode to API_AND_CONFIG_MAP…"
-              aws eks update-cluster-config --name "$CLUSTER" \
-                --access-config authenticationMode=API_AND_CONFIG_MAP
-              aws eks wait cluster-active --name "$CLUSTER"
-              echo "Auth mode set. Verifying…"
-              aws eks describe-cluster --name "$CLUSTER" \
-                --query 'cluster.accessConfig.authenticationMode' --output text
-            else
-              echo "Auth mode already OK."
-            fi
+      - name: Ensure EKS access API is enabled (required for AccessEntry)
+        run: |
+          set -euo pipefail
+          CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
+          MODE=$(aws eks describe-cluster --name "$CLUSTER" \
+            --query 'cluster.accessConfig.authenticationMode' --output text 2>/dev/null || echo "UNKNOWN")
+          echo "Current auth mode: $MODE"
+          if [ "$MODE" != "API" ] && [ "$MODE" != "API_AND_CONFIG_MAP" ]; then
+            echo "Updating cluster auth mode to API_AND_CONFIG_MAP…"
+            aws eks update-cluster-config --name "$CLUSTER" \
+              --access-config authenticationMode=API_AND_CONFIG_MAP
+            aws eks wait cluster-active --name "$CLUSTER"
+            echo "Auth mode set. Verifying…"
+            aws eks describe-cluster --name "$CLUSTER" \
+              --query 'cluster.accessConfig.authenticationMode' --output text
+          else
+            echo "Auth mode already OK."
+          fi
       - name: Bootstrap Argo CD (CFN -> CodeBuild -> Argo install)
         run: |
           aws cloudformation deploy \
