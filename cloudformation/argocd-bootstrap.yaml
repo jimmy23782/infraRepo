@@ -102,12 +102,32 @@ Resources:
           phases:
             install:
               commands:
-                - set -e
-                - echo "Install kubectl"
-                - curl -sLo kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.30.0/2024-06-12/bin/linux/amd64/kubectl
-                - chmod +x kubectl && mv kubectl /usr/local/bin/
+                - set -Eeuo pipefail
+                - echo "Discover cluster version…"
+                - CLUSTER_VER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION" \
+                    --query 'cluster.version' --output text)
+                - test -n "$CLUSTER_VER"
+                - echo "Cluster version: $CLUSTER_VER"
+
+                - echo "Download kubectl for EKS $CLUSTER_VER"
+                - KURL="https://amazon-eks.s3.us-west-2.amazonaws.com/${CLUSTER_VER}.0/2024-06-12/bin/linux/amd64/kubectl"
+                - SHASUM_URL="${KURL}.sha256"
+                - curl -sSL -o kubectl "$KURL"
+                - curl -sSL -o kubectl.sha256 "$SHASUM_URL"
+
+                - echo "Verify SHA256…"
+                - echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
+
+                - echo "Install kubectl and validate it runs…"
+                - chmod +x kubectl
+                - mv kubectl /usr/local/bin/
+                - kubectl version --client=true --short
+
                 - echo "Configure kubeconfig"
                 - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
+
+                - echo "Sanity check cluster access…"
+                - kubectl auth can-i get pods --all-namespaces
             build:
               commands:
                 - set -e
