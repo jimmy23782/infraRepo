@@ -113,6 +113,28 @@ Resources:
                 - kubectl version --client -o=yaml | sed -n '1,6p'
                 - echo "Configure kubeconfig"
                 - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
+            pre_build:
+              commands:
+                - set -euo pipefail
+                - echo "Wait for API server..."
+                - |
+                  for i in {1..30}; do
+                    if kubectl version --request-timeout=10s >/dev/null 2>&1; then
+                      echo "API OK"; break
+                    fi
+                    echo "API not ready yet... ($i/30)"; sleep 5
+                  done
+                - echo "Wait for at least 1 Ready node..."
+                - |
+                  for i in {1..60}; do
+                    READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"{c++} END{print c+0}')
+                    if [ "${READY:-0}" -ge 1 ]; then
+                      echo "Found ${READY} Ready node(s)."
+                      kubectl get nodes -o wide
+                      break
+                    fi
+                    echo "No Ready nodes yet... ($i/60)"; sleep 10
+                  done
             build:
               commands:
                 - set -euo pipefail
@@ -122,15 +144,17 @@ Resources:
                 - kubectl apply -n "$K8S_NS" -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
                 - echo "Wait for Argo CD server deployment to become available (up to 15 minutes)"
                 - |
+                  ok=false
                   for i in {1..30}; do
                     if kubectl -n "$K8S_NS" rollout status deploy/argocd-server --timeout=30s; then
-                      echo "Argo CD server is ready"
-                      break
+                      echo "Argo CD server is ready"; ok=true; break
                     else
                       echo "Argo CD server not ready yet... retrying ($i/30)"
+                      kubectl -n "$K8S_NS" get pods -owide || true
                       sleep 30
                     fi
                   done
+                  $ok || { echo "argocd-server did not become ready in time"; exit 1; }
                 - |
                   if [ "$EXPOSE_LB" = "true" ]; then
                     echo "Patch argocd-server Service to type=LoadBalancer"
