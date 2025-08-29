@@ -102,35 +102,22 @@ Resources:
           phases:
             install:
               commands:
-                - set -Eeuo pipefail
-                - echo "Discover cluster version…"
-                - CLUSTER_VER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION" \
-                    --query 'cluster.version' --output text)
-                - test -n "$CLUSTER_VER"
-                - echo "Cluster version: $CLUSTER_VER"
-
-                - echo "Download kubectl for EKS $CLUSTER_VER"
-                - KURL="https://amazon-eks.s3.us-west-2.amazonaws.com/${CLUSTER_VER}.0/2024-06-12/bin/linux/amd64/kubectl"
-                - SHASUM_URL="${KURL}.sha256"
-                - curl -sSL -o kubectl "$KURL"
-                - curl -sSL -o kubectl.sha256 "$SHASUM_URL"
-
-                - echo "Verify SHA256…"
-                - echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
-
-                - echo "Install kubectl and validate it runs…"
+                - set -euo pipefail
+                - KVER=1.30.0
+                - KDATE=2024-06-12
+                - KURL="https://amazon-eks.s3.us-west-2.amazonaws.com/${KVER}/${KDATE}/bin/linux/amd64/kubectl"
+                - echo "Downloading kubectl ${KVER} ..."
+                - curl -sLo kubectl "${KURL}"
+                - echo "Verifying kubectl is ELF and executable..."
+                - file kubectl || true
                 - chmod +x kubectl
                 - mv kubectl /usr/local/bin/
-                - kubectl version --client=true --short
-
+                - kubectl version --client --short || { echo 'kubectl not working'; exit 1; }
                 - echo "Configure kubeconfig"
                 - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
-
-                - echo "Sanity check cluster access…"
-                - kubectl auth can-i get pods --all-namespaces
             build:
               commands:
-                - set -e
+                - set -euo pipefail
                 - echo "Create namespace if not exists"
                 - kubectl create namespace "$K8S_NS" || true
                 - echo "Install Argo CD (official manifests)"
@@ -203,7 +190,9 @@ Resources:
       Code:
         ZipFile: |
           import json, time, urllib.request, boto3, traceback
+
           cb = boto3.client('codebuild')
+
           def respond(event, status, data=None, reason=None):
               body = {
                   'Status': status,
@@ -217,23 +206,54 @@ Resources:
               req = urllib.request.Request(event['ResponseURL'], data=json.dumps(body).encode(), method='PUT')
               req.add_header('content-type','')
               urllib.request.urlopen(req)
+
           def handler(event, context):
               try:
-                  t = event['RequestType']
+                  req_type = event['RequestType']
                   proj = event['ResourceProperties']['ProjectName']
-                  if t in ['Create','Update']:
+                  print(f"RequestType={req_type} ProjectName={proj}")
+
+                  if req_type in ['Create','Update']:
                       r = cb.start_build(projectName=proj)
                       bid = r['build']['id']
+                      print(f"Started build: {bid}")
+
+                      status = None
+                      last_phase = None
+                      log_group = None
+                      log_stream = None
                       while True:
-                          time.sleep(10)
-                          b = cb.batch_get_builds(ids=[bid])['builds'][0]
-                          st = b['buildStatus']
-                          if st in ['SUCCEEDED','FAILED','FAULT','STOPPED','TIMED_OUT']:
+                          time.sleep(8)
+                          bresp = cb.batch_get_builds(ids=[bid])
+                          b = bresp['builds'][0]
+                          status = b.get('buildStatus')
+                          last_phase = b.get('currentPhase')
+                          logs = b.get('logs') or {}
+                          log_group = logs.get('groupName')
+                          log_stream = logs.get('streamName')
+                          print(f"Build {bid} status={status} phase={last_phase} logs={log_group}/{log_stream}")
+                          if status in ['SUCCEEDED','FAILED','FAULT','STOPPED','TIMED_OUT']:
                               break
-                      if st == 'SUCCEEDED':
-                          respond(event, 'SUCCESS', {'BuildId': bid})
+
+                      data = {'BuildId': bid}
+                      if log_group:  data['LogGroup'] = log_group
+                      if log_stream: data['LogStream'] = log_stream
+
+                      if status == 'SUCCEEDED':
+                          respond(event, 'SUCCESS', data=data)
                       else:
-                          respond(event, 'FAILED', {'BuildId': bid}, reason=f'CodeBuild status: {st}')
+                          reason = f"CodeBuild status: {status}"
+                          try:
+                              phases = b.get('phases', [])
+                              for p in reversed(phases):
+                                  if p.get('phaseStatus') == 'FAILED' and p.get('contexts'):
+                                      msg = p['contexts'][0].get('message')
+                                      if msg:
+                                          reason = f"{reason} | {p.get('phase')}: {msg}"
+                                          break
+                          except Exception as e:
+                              print(f"Could not extract phase reason: {e}")
+                          respond(event, 'FAILED', data=data, reason=reason)
                   else:
                       respond(event, 'SUCCESS', {'Message': 'No action on Delete'})
               except Exception as e:
@@ -243,7 +263,7 @@ Resources:
   ArgoInstall:
     Type: AWS::CloudFormation::CustomResource
     DependsOn:
-      - CodeBuildClusterAdminAccess   # keep this (not implied by a Ref)
+      - CodeBuildClusterAdminAccess
     Properties:
       ServiceToken: !GetAtt TriggerFn.Arn
       ProjectName: !Ref ArgoBootstrapProject
