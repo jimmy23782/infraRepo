@@ -99,6 +99,8 @@ Resources:
         Type: NO_SOURCE
         BuildSpec: |
           version: 0.2
+          env:
+            shell: bash   # <-- Force bash so 'set -euo pipefail' works
           phases:
             install:
               commands:
