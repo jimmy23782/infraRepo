@@ -41,18 +41,15 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Needed by 'aws eks update-kubeconfig'
               - Effect: Allow
                 Action: [ eks:DescribeCluster ]
                 Resource: "*"
-              # Common reads
               - Effect: Allow
                 Action:
                   - ec2:DescribeVpcs
                   - ec2:DescribeSubnets
                   - ec2:DescribeSecurityGroups
                 Resource: "*"
-              # SSM parameter writes/reads
               - Effect: Allow
                 Action:
                   - ssm:PutParameter
@@ -60,7 +57,6 @@ Resources:
                   - ssm:GetParameter
                   - ssm:GetParameters
                 Resource: "*"
-              # ECR pulls (just in case)
               - Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
@@ -114,7 +110,7 @@ Resources:
                 - curl -sL "https://dl.k8s.io/release/v${KVER}/bin/linux/amd64/kubectl.sha256" -o kubectl.sha256
                 - echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
                 - chmod +x kubectl && mv kubectl /usr/local/bin/
-                - kubectl version --client --short
+                - kubectl version --client -o=yaml | sed -n '1,6p'
                 - echo "Configure kubeconfig"
                 - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
             build:
