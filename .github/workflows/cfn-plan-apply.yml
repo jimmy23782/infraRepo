@@ -167,7 +167,42 @@ jobs:
               aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
             fi
           fi
+      - name: Reconcile existing nodegroup with desired name (delete if unmanaged)
+        run: |
+          set -euo pipefail
+          # desired nodegroup name from your params file
+          DESIRED=$(jq -r '.Parameters.NodeGroupName' cloudformation/parameters/${ENV}/nodegroup.json)
+          if [ -z "${DESIRED}" ] || [ "${DESIRED}" = "null" ]; then
+            DESIRED="ng-public"
+          fi
 
+          # cluster name from EKS stack output
+          CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
+
+          echo "Cluster: ${CLUSTER}"
+          echo "Desired nodegroup: ${DESIRED}"
+
+          # does a nodegroup with that name exist in the cluster?
+          if aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$DESIRED" >/dev/null 2>&1; then
+            echo "Nodegroup '$DESIRED' exists in cluster."
+
+            # is it already managed by this CFN stack?
+            NG_IN_STACK=$(aws cloudformation describe-stack-resources --stack-name "${NG_STACK}" \
+              --logical-resource-id ManagedNodeGroup \
+              --query 'StackResources[0].PhysicalResourceId' --output text 2>/dev/null || echo "None")
+
+            if [ -z "$NG_IN_STACK" ] || [ "$NG_IN_STACK" = "None" ]; then
+              echo "It is NOT managed by stack ${NG_STACK}. Deleting it to let CFN create it..."
+              aws eks delete-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$DESIRED"
+              aws eks wait nodegroup-deleted --cluster-name "$CLUSTER" --nodegroup-name "$DESIRED"
+              echo "Deleted conflicting nodegroup '$DESIRED'."
+            else
+              echo "Nodegroup '$DESIRED' is already managed by stack (${NG_IN_STACK}). No action."
+            fi
+          else
+            echo "No conflicting nodegroup named '$DESIRED' found."
+          fi
       - name: Create/Update node group
         run: |
           PARAMS=$(jq -r '.Parameters | to_entries[] | "\(.key)=\(.value)"' cloudformation/parameters/${ENV}/nodegroup.json)
