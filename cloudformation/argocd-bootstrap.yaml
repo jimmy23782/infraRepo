@@ -1,79 +1,10 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: Minimal Argo CD bootstrap onto existing EKS via CodeBuild + Lambda (no local kubectl).
-
-Parameters:
-  ClusterName:
-    Type: String
-    Description: Existing EKS cluster name (e.g., demo-eks-dev)
-  Region:
-    Type: String
-    Default: ap-southeast-2
-  KubernetesNamespace:
-    Type: String
-    Default: argocd
-  ExposeServerAsLB:
-    Type: String
-    AllowedValues: ["true", "false"]
-    Default: "true"
-    Description: If true, patch argocd-server to type=LoadBalancer
-  SSMParamPrefix:
-    Type: String
-    Default: /eks
-    Description: SSM prefix where outputs are stored (e.g., /eks/<cluster>/argocd/*)
-
-Resources:
-
-  # ---- CodeBuild role ----
-  CodeBuildServiceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: codebuild.amazonaws.com }
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
-      Policies:
-        - PolicyName: ArgoBootstrapPerms
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              # Needed by 'aws eks update-kubeconfig'
-              - Effect: Allow
-                Action: [ eks:DescribeCluster ]
-                Resource: "*"
-              # Common reads
-              - Effect: Allow
-                Action:
-                  - ec2:DescribeVpcs
-                  - ec2:DescribeSubnets
-                  - ec2:DescribeSecurityGroups
-                Resource: "*"
-              # SSM parameter writes/reads
-              - Effect: Allow
-                Action:
-                  - ssm:PutParameter
-                  - ssm:AddTagsToResource
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                Resource: "*"
-              # ECR pulls (just in case)
-              - Effect: Allow
-                Action:
-                  - ecr:GetAuthorizationToken
-                  - ecr:BatchGetImage
-                  - ecr:GetDownloadUrlForLayer
-                Resource: "*"
-
-  # ---- CodeBuild project (no source; just runs commands) ----
   ArgoBootstrapProject:
     Type: AWS::CodeBuild::Project
     Properties:
       Name: !Sub "argocd-bootstrap-${ClusterName}"
       ServiceRole: !GetAtt CodeBuildServiceRole.Arn
-      Artifacts: { Type: NO_ARTIFACTS }
+      Artifacts:
+        Type: NO_ARTIFACTS
       TimeoutInMinutes: 30
       Environment:
         Type: LINUX_CONTAINER
@@ -100,21 +31,19 @@ Resources:
         BuildSpec: |
           version: 0.2
           env:
-            shell: bash   # <-- Force bash so 'set -euo pipefail' works
+            shell: bash
           phases:
             install:
               commands:
                 - set -euo pipefail
                 - KVER=1.30.0
-                - KDATE=2024-06-12
-                - KURL="https://amazon-eks.s3.us-west-2.amazonaws.com/${KVER}/${KDATE}/bin/linux/amd64/kubectl"
-                - echo "Downloading kubectl ${KVER} ..."
-                - curl -sLo kubectl "${KURL}"
-                - echo "Verifying kubectl is ELF and executable..."
-                - file kubectl || true
-                - chmod +x kubectl
-                - mv kubectl /usr/local/bin/
-                - kubectl version --client --short || { echo 'kubectl not working'; exit 1; }
+                - echo "Downloading kubectl v${KVER} from dl.k8s.io ..."
+                - curl -sLo kubectl "https://dl.k8s.io/release/v${KVER}/bin/linux/amd64/kubectl"
+                - echo "Verifying kubectl checksum..."
+                - curl -sL "https://dl.k8s.io/release/v${KVER}/bin/linux/amd64/kubectl.sha256" -o kubectl.sha256
+                - echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
+                - chmod +x kubectl && mv kubectl /usr/local/bin/
+                - kubectl version --client --short
                 - echo "Configure kubeconfig"
                 - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
             build:
@@ -149,131 +78,3 @@ Resources:
                   else
                     echo "LB hostname not ready yet; you can check later and write it to SSM manually."
                   fi
-
-  # ---- Grant the CodeBuild role cluster-admin on the EKS cluster (no aws-auth edits)
-  CodeBuildClusterAdminAccess:
-    Type: AWS::EKS::AccessEntry
-    Properties:
-      ClusterName: !Ref ClusterName
-      PrincipalArn: !GetAtt CodeBuildServiceRole.Arn
-      AccessPolicies:
-        - AccessScope:
-            Type: cluster
-          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
-
-  # ---- Lambda (custom resource) to start CodeBuild & wait ----
-  TriggerRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: lambda.amazonaws.com }
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: CodeBuildInvoke
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: [ codebuild:StartBuild, codebuild:BatchGetBuilds ]
-                Resource: "*"
-
-  TriggerFn:
-    Type: AWS::Lambda::Function
-    Properties:
-      Runtime: python3.11
-      Handler: index.handler
-      Role: !GetAtt TriggerRole.Arn
-      Timeout: 900
-      Code:
-        ZipFile: |
-          import json, time, urllib.request, boto3, traceback
-
-          cb = boto3.client('codebuild')
-
-          def respond(event, status, data=None, reason=None):
-              body = {
-                  'Status': status,
-                  'Reason': reason or 'See CloudWatch Logs',
-                  'PhysicalResourceId': event.get('PhysicalResourceId', 'ArgoBootstrap'),
-                  'StackId': event['StackId'],
-                  'RequestId': event['RequestId'],
-                  'LogicalResourceId': event['LogicalResourceId'],
-                  'Data': data or {}
-              }
-              req = urllib.request.Request(event['ResponseURL'], data=json.dumps(body).encode(), method='PUT')
-              req.add_header('content-type','')
-              urllib.request.urlopen(req)
-
-          def handler(event, context):
-              try:
-                  req_type = event['RequestType']
-                  proj = event['ResourceProperties']['ProjectName']
-                  print(f"RequestType={req_type} ProjectName={proj}")
-
-                  if req_type in ['Create','Update']:
-                      r = cb.start_build(projectName=proj)
-                      bid = r['build']['id']
-                      print(f"Started build: {bid}")
-
-                      status = None
-                      last_phase = None
-                      log_group = None
-                      log_stream = None
-                      while True:
-                          time.sleep(8)
-                          bresp = cb.batch_get_builds(ids=[bid])
-                          b = bresp['builds'][0]
-                          status = b.get('buildStatus')
-                          last_phase = b.get('currentPhase')
-                          logs = b.get('logs') or {}
-                          log_group = logs.get('groupName')
-                          log_stream = logs.get('streamName')
-                          print(f"Build {bid} status={status} phase={last_phase} logs={log_group}/{log_stream}")
-                          if status in ['SUCCEEDED','FAILED','FAULT','STOPPED','TIMED_OUT']:
-                              break
-
-                      data = {'BuildId': bid}
-                      if log_group:  data['LogGroup'] = log_group
-                      if log_stream: data['LogStream'] = log_stream
-
-                      if status == 'SUCCEEDED':
-                          respond(event, 'SUCCESS', data=data)
-                      else:
-                          reason = f"CodeBuild status: {status}"
-                          try:
-                              phases = b.get('phases', [])
-                              for p in reversed(phases):
-                                  if p.get('phaseStatus') == 'FAILED' and p.get('contexts'):
-                                      msg = p['contexts'][0].get('message')
-                                      if msg:
-                                          reason = f"{reason} | {p.get('phase')}: {msg}"
-                                          break
-                          except Exception as e:
-                              print(f"Could not extract phase reason: {e}")
-                          respond(event, 'FAILED', data=data, reason=reason)
-                  else:
-                      respond(event, 'SUCCESS', {'Message': 'No action on Delete'})
-              except Exception as e:
-                  traceback.print_exc()
-                  respond(event, 'FAILED', reason=str(e))
-
-  ArgoInstall:
-    Type: AWS::CloudFormation::CustomResource
-    DependsOn:
-      - CodeBuildClusterAdminAccess
-    Properties:
-      ServiceToken: !GetAtt TriggerFn.Arn
-      ProjectName: !Ref ArgoBootstrapProject
-
-Outputs:
-  ArgoCDNamespace:
-    Value: !Ref KubernetesNamespace
-  SSMAdminPasswordParam:
-    Value: !Sub "${SSMParamPrefix}/${ClusterName}/argocd/admin-password"
-  SSMServerHostnameParam:
-    Value: !Sub "${SSMParamPrefix}/${ClusterName}/argocd/server-hostname"
