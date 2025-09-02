@@ -139,19 +139,18 @@ jobs:
           CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
 
-          # Principal is the GitHub OIDC role assumed by this job
-          PRINCIPAL=$(aws sts get-caller-identity --query Arn --output text)
-          echo "Granting cluster access to principal: $PRINCIPAL on cluster: $CLUSTER"
+          # Use the actual IAM role ARN (not the ephemeral STS ARN)
+          PRINCIPAL_ARN="arn:aws:iam::685801731369:role/github-oidc-deployer"
 
-          # Create access entry if it doesn't exist
-          if ! aws eks describe-access-entry --cluster-name "$CLUSTER" --principal-arn "$PRINCIPAL" >/dev/null 2>&1; then
-            aws eks create-access-entry --cluster-name "$CLUSTER" --principal-arn "$PRINCIPAL" --type STANDARD
-          fi
+          echo "Granting cluster access to principal: $PRINCIPAL_ARN on cluster: $CLUSTER"
+          aws eks create-access-entry \
+            --cluster-name "$CLUSTER" \
+            --principal-arn "$PRINCIPAL_ARN" \
+            --type STANDARD || true
 
-          # Associate cluster-admin access policy (cluster-scope)
           aws eks associate-access-policy \
             --cluster-name "$CLUSTER" \
-            --principal-arn "$PRINCIPAL" \
+            --principal-arn "$PRINCIPAL_ARN" \
             --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
             --access-scope type=cluster || true
                       
