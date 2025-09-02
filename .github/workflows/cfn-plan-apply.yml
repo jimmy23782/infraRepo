@@ -29,6 +29,11 @@ env:
   NG_STACK: demo-eks-nodegroup-dev
   ARGO_STACK: demo-eks-argocd-dev
 
+  # —— GitOps wiring for ArgoCD bootstrap ——
+  GITOPS_REPO_URL: https://github.com/jimmy23782/GitOpsRepo.git
+  GITOPS_BRANCH: feature/setuphelmcharts
+  GITOPS_ROOT_PATH: argo/apps     # folder in GitOps repo that contains child Application CRs
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -133,27 +138,6 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
           aws eks wait cluster-active --name "$CLUSTER"
 
-      - name: Grant cluster access to this CI role (EKS AccessEntry)
-        run: |
-          set -euo pipefail
-          CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
-            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
-
-          # Use the actual IAM role ARN (not the ephemeral STS ARN)
-          PRINCIPAL_ARN="arn:aws:iam::685801731369:role/github-oidc-deployer"
-
-          echo "Granting cluster access to principal: $PRINCIPAL_ARN on cluster: $CLUSTER"
-          aws eks create-access-entry \
-            --cluster-name "$CLUSTER" \
-            --principal-arn "$PRINCIPAL_ARN" \
-            --type STANDARD || true
-
-          aws eks associate-access-policy \
-            --cluster-name "$CLUSTER" \
-            --principal-arn "$PRINCIPAL_ARN" \
-            --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
-            --access-scope type=cluster || true
-                      
       - name: Ensure EKS access API is enabled (required for AccessEntry)
         run: |
           set -euo pipefail
@@ -167,6 +151,23 @@ jobs:
               --access-config authenticationMode=API_AND_CONFIG_MAP
             aws eks wait cluster-active --name "$CLUSTER"
           fi
+
+      - name: Grant cluster access to this CI role (EKS AccessEntry)
+        run: |
+          set -euo pipefail
+          CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
+          PRINCIPAL_ARN="arn:aws:iam::685801731369:role/github-oidc-deployer"
+          echo "Granting cluster access to principal: $PRINCIPAL_ARN on cluster: $CLUSTER"
+          aws eks create-access-entry \
+            --cluster-name "$CLUSTER" \
+            --principal-arn "$PRINCIPAL_ARN" \
+            --type STANDARD || true
+          aws eks associate-access-policy \
+            --cluster-name "$CLUSTER" \
+            --principal-arn "$PRINCIPAL_ARN" \
+            --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+            --access-scope type=cluster || true
 
       # ---------- NODEGROUP (BEFORE Argo) ----------
       - name: Preflight - heal/delete stuck Nodegroup stack
@@ -188,42 +189,30 @@ jobs:
               aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
             fi
           fi
+
       - name: Reconcile existing nodegroup with desired name (delete if unmanaged)
         run: |
           set -euo pipefail
-          # desired nodegroup name from your params file
           DESIRED=$(jq -r '.Parameters.NodeGroupName' cloudformation/parameters/${ENV}/nodegroup.json)
-          if [ -z "${DESIRED}" ] || [ "${DESIRED}" = "null" ]; then
-            DESIRED="ng-public"
-          fi
-
-          # cluster name from EKS stack output
+          if [ -z "${DESIRED}" ] || [ "${DESIRED}" = "null" ]; then DESIRED="ng-public"; fi
           CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
-
-          echo "Cluster: ${CLUSTER}"
-          echo "Desired nodegroup: ${DESIRED}"
-
-          # does a nodegroup with that name exist in the cluster?
+          echo "Cluster: ${CLUSTER} | Desired nodegroup: ${DESIRED}"
           if aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$DESIRED" >/dev/null 2>&1; then
-            echo "Nodegroup '$DESIRED' exists in cluster."
-
-            # is it already managed by this CFN stack?
             NG_IN_STACK=$(aws cloudformation describe-stack-resources --stack-name "${NG_STACK}" \
               --logical-resource-id ManagedNodeGroup \
               --query 'StackResources[0].PhysicalResourceId' --output text 2>/dev/null || echo "None")
-
             if [ -z "$NG_IN_STACK" ] || [ "$NG_IN_STACK" = "None" ]; then
-              echo "It is NOT managed by stack ${NG_STACK}. Deleting it to let CFN create it..."
+              echo "Conflicting unmanaged nodegroup found; deleting..."
               aws eks delete-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$DESIRED"
               aws eks wait nodegroup-deleted --cluster-name "$CLUSTER" --nodegroup-name "$DESIRED"
-              echo "Deleted conflicting nodegroup '$DESIRED'."
             else
-              echo "Nodegroup '$DESIRED' is already managed by stack (${NG_IN_STACK}). No action."
+              echo "Nodegroup is already managed by stack: ${NG_IN_STACK}"
             fi
           else
             echo "No conflicting nodegroup named '$DESIRED' found."
           fi
+
       - name: Create/Update node group
         run: |
           PARAMS=$(jq -r '.Parameters | to_entries[] | "\(.key)=\(.value)"' cloudformation/parameters/${ENV}/nodegroup.json)
@@ -238,7 +227,6 @@ jobs:
         run: |
           set -euo pipefail
           KVER="1.30.0"
-          echo "Installing kubectl v${KVER} on runner..."
           curl -sLo kubectl "https://dl.k8s.io/release/v${KVER}/bin/linux/amd64/kubectl"
           curl -sL "https://dl.k8s.io/release/v${KVER}/bin/linux/amd64/kubectl.sha256" -o kubectl.sha256
           echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
@@ -250,25 +238,14 @@ jobs:
           set -euo pipefail
           CLUSTER=$(aws cloudformation describe-stacks --stack-name "${EKS_STACK}" \
             --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
-
-          echo "Ensuring kubeconfig for $CLUSTER..."
           aws eks update-kubeconfig --name "$CLUSTER" --region "${AWS_REGION}"
-
-          echo "Waiting for cluster API..."
           for i in {1..30}; do
-            if kubectl version --request-timeout=10s >/dev/null 2>&1; then
-              echo "API OK"; break
-            fi
+            if kubectl version --request-timeout=10s >/dev/null 2>&1; then break; fi
             echo "API not ready yet... ($i/30)"; sleep 5
           done
-
-          echo "Waiting for at least 1 Ready node..."
           for i in {1..40}; do
             READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"{c++} END{print c+0}')
-            if [ "${READY:-0}" -ge 1 ]; then
-              kubectl get nodes -o wide
-              exit 0
-            fi
+            if [ "${READY:-0}" -ge 1 ]; then kubectl get nodes -o wide; exit 0; fi
             echo "No Ready nodes yet... ($i/40)"; sleep 15
           done
           echo "No Ready nodes after waiting."; exit 1
@@ -297,6 +274,9 @@ jobs:
               KubernetesNamespace=argocd \
               ExposeServerAsLB=true \
               SSMParamPrefix=/eks/${{ env.ENV }} \
+              GitOpsRepoUrl=${{ env.GITOPS_REPO_URL }} \
+              GitOpsBranch=${{ env.GITOPS_BRANCH }} \
+              GitOpsRootPath=${{ env.GITOPS_ROOT_PATH }} \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
 

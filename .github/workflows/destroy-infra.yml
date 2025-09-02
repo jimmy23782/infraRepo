@@ -106,29 +106,20 @@ jobs:
           fi
 
       # --- Remove EKS AccessEntry that granted CodeBuild cluster-admin ---
-      - name: Remove CodeBuild AccessEntry from EKS (if present)
+      - name: Remove GitHub OIDC deployer AccessEntry from EKS
         continue-on-error: true
-        env:
-          CLUSTER_NAME: ${{ steps.derive.outputs.cluster_name }}
         run: |
           set -euo pipefail
-          # Try to find our CodeBuild service role by stack name pattern
-          ROLE_ARN=$(aws iam list-roles \
-            --query "Roles[?starts_with(RoleName,'${{ env.ARGO_STACK }}-CodeBuildServiceRole-')].Arn | [0]" \
-            --output text 2>/dev/null || echo "None")
-          if [ -z "$ROLE_ARN" ] || [ "$ROLE_ARN" = "None" ]; then
-            echo "CodeBuild service role not found; skipping AccessEntry cleanup."
-            exit 0
-          fi
-          # Find exact matching access entry by principalArn and delete it
-          MATCH=$(aws eks list-access-entries --cluster-name "$CLUSTER_NAME" \
-                  --query "accessEntries[?principalArn=='${ROLE_ARN}'].principalArn | [0]" \
-                  --output text 2>/dev/null || echo "None")
-          if [ "$MATCH" != "None" ] && [ -n "$MATCH" ]; then
-            echo "Deleting EKS AccessEntry for $MATCH"
-            aws eks delete-access-entry --cluster-name "$CLUSTER_NAME" --principal-arn "$MATCH" || true
+          CLUSTER="${{ steps.derive.outputs.cluster_name }}"
+          PRINCIPAL_ARN="arn:aws:iam::685801731369:role/github-oidc-deployer"
+
+          echo "Checking for AccessEntry for $PRINCIPAL_ARN in cluster $CLUSTER..."
+          if aws eks describe-access-entry --cluster-name "$CLUSTER" --principal-arn "$PRINCIPAL_ARN" >/dev/null 2>&1; then
+            echo "AccessEntry exists. Deleting..."
+            aws eks delete-access-entry --cluster-name "$CLUSTER" --principal-arn "$PRINCIPAL_ARN" || true
+            echo "Deleted AccessEntry for $PRINCIPAL_ARN"
           else
-            echo "No matching AccessEntry for $ROLE_ARN"
+            echo "No AccessEntry found for $PRINCIPAL_ARN"
           fi
 
       # --- Nodegroup delete + heal ---
