@@ -29,7 +29,7 @@ Parameters:
     Default: feature/setuphelmcharts   # <- set to your feature branch (optional; you also pass this in workflow)
   GitOpsRootPath:
     Type: String
-    Default: argo/apps
+    Default: gitopsRepo/argo/apps
     Description: Path in repo that holds child apps (app-of-apps)
 
 Resources:

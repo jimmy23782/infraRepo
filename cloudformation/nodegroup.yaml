@@ -14,7 +14,7 @@ Parameters:
     Default: "t3.small"
   DesiredSize:
     Type: Number
-    Default: 1
+    Default: 2
   MinSize:
     Type: Number
     Default: 1
