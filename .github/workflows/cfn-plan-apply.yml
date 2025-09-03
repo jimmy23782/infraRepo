@@ -32,7 +32,7 @@ env:
   # —— GitOps wiring for ArgoCD bootstrap ——
   GITOPS_REPO_URL: https://github.com/jimmy23782/GitOpsRepo.git
   GITOPS_BRANCH: feature/setuphelmcharts
-  GITOPS_ROOT_PATH: argo/apps     # folder in GitOps repo that contains child Application CRs
+  GITOPS_ROOT_PATH: argo/apps
 
 jobs:
   deploy:
@@ -62,7 +62,6 @@ jobs:
           aws cloudformation validate-template --template-body file://cloudformation/nodegroup.yaml
           aws cloudformation validate-template --template-body file://cloudformation/argocd-bootstrap.yaml
 
-      # ---------- VPC ----------
       # ---------- VPC (persist & reuse) ----------
       - name: Detect VPC stack status
         id: vpc_status
@@ -119,7 +118,6 @@ jobs:
         id: vpc
         run: |
           set -euo pipefail
-          # fetch once after any of the above steps
           PUBS=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
                     --query "Stacks[0].Outputs[?OutputKey=='PublicSubnetIds'].OutputValue | [0]" --output text)
           VPCID=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
