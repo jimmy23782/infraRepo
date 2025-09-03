@@ -17,6 +17,11 @@ Parameters:
   Pub2Cidr:
     Type: String
     Default: "10.0.16.0/20"
+  # NEW: pass the EKS cluster name to tag subnets once
+  ClusterName:
+    Type: String
+    Default: "demo-eks-dev"
+    Description: "EKS cluster name used for subnet discovery/cleanup tags"
 
 Resources:
   VPC:
@@ -58,8 +63,12 @@ Resources:
       CidrBlock: !Ref Pub1Cidr
       MapPublicIpOnLaunch: true
       Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-${AZ1}"
         - Key: kubernetes.io/role/elb
           Value: "1"
+        - Key: !Sub "kubernetes.io/cluster/${ClusterName}"
+          Value: "shared"
 
   PublicSubnet2:
     Type: AWS::EC2::Subnet
@@ -69,8 +78,12 @@ Resources:
       CidrBlock: !Ref Pub2Cidr
       MapPublicIpOnLaunch: true
       Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-${AZ2}"
         - Key: kubernetes.io/role/elb
           Value: "1"
+        - Key: !Sub "kubernetes.io/cluster/${ClusterName}"
+          Value: "shared"
 
   AssocPub1:
     Type: AWS::EC2::SubnetRouteTableAssociation

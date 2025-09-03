@@ -23,6 +23,7 @@ env:
   EKS_STACK: demo-eks-eks-${{ github.event.inputs.env }}
   NG_STACK:  demo-eks-nodegroup-${{ github.event.inputs.env }}
   ARGO_STACK: demo-eks-argocd-${{ github.event.inputs.env }}
+  KEEP_VPC: "true"   # <- default: do NOT delete VPC
 
 jobs:
   destroy:
@@ -51,6 +52,7 @@ jobs:
           echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
 
       - name: Discover VPC ID from stack (if present)
+        if: ${{ env.KEEP_VPC != 'true' }}
         id: vpcid
         run: |
           set -euo pipefail
@@ -80,7 +82,7 @@ jobs:
           set -euo pipefail
           if aws eks update-kubeconfig --name "$CLUSTER_NAME" --region $AWS_REGION >/dev/null 2>&1; then
             echo "Kubeconfig set. Deleting LB Services/Ingress/PVCs to release AWS resources..."
-            kubectl get svc -A --no-headers | awk '$5 ~ /LoadBalancer/ {print $1, $2}' | xargs -n2 kubectl -n delete svc || true
+            kubectl get svc -A --no-headers | awk '$3=="LoadBalancer"{print $1, $2}' | xargs -n2 kubectl -n delete svc || true
             kubectl delete ingress --all -A || true
             kubectl delete pvc --all -A || true
           else
@@ -236,6 +238,7 @@ jobs:
 
       # --- VPC delete + heal ---
       - name: Delete VPC stack
+        if: ${{ env.KEEP_VPC != 'true' }}
         run: |
           if aws cloudformation describe-stacks --stack-name "${{ env.VPC_STACK }}" >/dev/null 2>&1; then
             aws cloudformation delete-stack --stack-name "${{ env.VPC_STACK }}"
@@ -245,7 +248,7 @@ jobs:
           fi
 
       - name: Heal VPC DELETE_FAILED (retain blockers to clear stack record)
-        if: always()
+        if: ${{ env.KEEP_VPC != 'true' }}
         run: |
           set -euo pipefail
           STACK="${{ env.VPC_STACK }}"
@@ -266,7 +269,7 @@ jobs:
           fi
 
       - name: Deep clean VPC dependencies (best-effort)
-        if: always()
+        if: ${{ env.KEEP_VPC != 'true' }}
         continue-on-error: true
         env:
           VPC_ID: ${{ steps.vpcid.outputs.vpc_id }}

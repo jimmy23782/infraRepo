@@ -63,69 +63,73 @@ jobs:
           aws cloudformation validate-template --template-body file://cloudformation/argocd-bootstrap.yaml
 
       # ---------- VPC ----------
-
-      # ---------- VPC (heal DELETE_FAILED before doing anything) ----------
-      - name: Preflight - heal/delete stuck VPC stack
+      # ---------- VPC (persist & reuse) ----------
+      - name: Detect VPC stack status
+        id: vpc_status
         run: |
           set -euo pipefail
-          STACK="${VPC_STACK}"
-          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
-            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
-          echo "VPC stack status: $STATUS"
-          if [[ "$STATUS" == "DELETE_FAILED" || "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" ]]; then
-            echo "Attempting forced delete of $STACK ..."
-            # find logical resources that failed deletion (retain them so the stack can delete)
-            mapfile -t FAILS < <(
-              aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 200 \
-                --query "reverse(StackEvents)[?contains(ResourceStatus,'DELETE_FAILED')].[LogicalResourceId]" \
-                --output text | awk '!seen[$0]++'
-            )
-            if [[ ${#FAILS[@]} -gt 0 ]]; then
-              echo "Retaining resources: ${FAILS[*]}"
-              aws cloudformation delete-stack --stack-name "$STACK" --retain-resources ${FAILS[*]} || true
-            else
-              aws cloudformation delete-stack --stack-name "$STACK" || true
-            fi
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
-          fi
-          
-      - name: Preflight - wait if VPC stack is IN_PROGRESS
-        run: |
-          set -e
           STATUS=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
-            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+                     --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
           echo "VPC stack status: $STATUS"
-          case "$STATUS" in
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for any in-progress VPC operation
+        if: ${{ steps.vpc_status.outputs.status == 'CREATE_IN_PROGRESS' ||
+                steps.vpc_status.outputs.status == 'UPDATE_IN_PROGRESS' ||
+                steps.vpc_status.outputs.status == 'UPDATE_COMPLETE_CLEANUP_IN_PROGRESS' ||
+                steps.vpc_status.outputs.status == 'DELETE_IN_PROGRESS' }}
+        run: |
+          set -euo pipefail
+          case "${{ steps.vpc_status.outputs.status }}" in
             CREATE_IN_PROGRESS) aws cloudformation wait stack-create-complete --stack-name "${VPC_STACK}" ;;
             UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS) aws cloudformation wait stack-update-complete --stack-name "${VPC_STACK}" ;;
             DELETE_IN_PROGRESS) aws cloudformation wait stack-delete-complete --stack-name "${VPC_STACK}" ;;
-            *) echo "No wait needed." ;;
           esac
 
-      - name: Create/Update VPC stack
+      - name: Guard – do not attempt to recreate broken VPC stack
+        if: ${{ steps.vpc_status.outputs.status == 'DELETE_FAILED' ||
+                steps.vpc_status.outputs.status == 'ROLLBACK_FAILED' ||
+                steps.vpc_status.outputs.status == 'ROLLBACK_COMPLETE' }}
         run: |
+          echo "::error ::VPC stack ${VPC_STACK} is in a failed terminal state (${{ steps.vpc_status.outputs.status }}). Since we persist VPCs, we will not auto-heal. Please clear or rename the stack before rerun."
+          exit 1
+
+      - name: Create VPC stack (first time only)
+        if: ${{ steps.vpc_status.outputs.status == 'NONE' }}
+        run: |
+          set -euo pipefail
+          echo "VPC stack not found; creating it once..."
           aws cloudformation deploy \
             --template-file cloudformation/vpc.yaml \
             --stack-name "${VPC_STACK}" \
             --parameter-overrides file://cloudformation/parameters/${ENV}/vpc.json \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
+          aws cloudformation wait stack-create-complete --stack-name "${VPC_STACK}"
+
+      - name: Skip VPC create/update (persisting existing VPC)
+        if: ${{ steps.vpc_status.outputs.status != 'NONE' &&
+                steps.vpc_status.outputs.status != 'CREATE_IN_PROGRESS' &&
+                steps.vpc_status.outputs.status != 'UPDATE_IN_PROGRESS' &&
+                steps.vpc_status.outputs.status != 'UPDATE_COMPLETE_CLEANUP_IN_PROGRESS' &&
+                steps.vpc_status.outputs.status != 'DELETE_IN_PROGRESS' }}
+        run: echo "Reusing existing VPC stack: ${{ env.VPC_STACK }}"
 
       - name: Get VPC outputs
         id: vpc
         run: |
           set -euo pipefail
-          VAL=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
-            --query "Stacks[0].Outputs[?OutputKey=='PublicSubnetIds'].OutputValue | [0]" \
-            --output text)
-          VAL_CLEAN=$(echo "$VAL" | tr -d '[:space:]')
-          if [ -z "$VAL_CLEAN" ] || [ "$VAL_CLEAN" = "None" ]; then
-            echo "ERROR: Output 'PublicSubnetIds' is missing/empty on stack ${VPC_STACK}" >&2
-            aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
-              --query "Stacks[0].Outputs" --output table || true
-            exit 1
+          # fetch once after any of the above steps
+          PUBS=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
+                    --query "Stacks[0].Outputs[?OutputKey=='PublicSubnetIds'].OutputValue | [0]" --output text)
+          VPCID=$(aws cloudformation describe-stacks --stack-name "${VPC_STACK}" \
+                    --query "Stacks[0].Outputs[?OutputKey=='VpcId'].OutputValue | [0]" --output text)
+          if [ -z "${PUBS// }" ] || [ "$PUBS" = "None" ]; then
+            echo "::error ::Output PublicSubnetIds missing on ${VPC_STACK}"; exit 1
           fi
-          echo "public_subnets=$VAL_CLEAN" >> "$GITHUB_OUTPUT"
+          echo "public_subnets=$PUBS" >> "$GITHUB_OUTPUT"
+          echo "vpc_id=$VPCID" >> "$GITHUB_OUTPUT"
+          echo "Using VPC: $VPCID"
 
       # ---------- EKS CONTROL PLANE ----------
       - name: Preflight - heal/delete stuck EKS stack
