@@ -6,7 +6,9 @@ on:
       - "cloudformation/**"
       - ".github/workflows/cfn-plan-apply.yml"
   push:
-    branches: ["main"]
+    branches:
+      - "main"
+      - "feature/**"
     paths:
       - "cloudformation/**"
       - ".github/workflows/cfn-plan-apply.yml"
