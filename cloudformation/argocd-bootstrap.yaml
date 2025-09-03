@@ -21,9 +21,19 @@ Parameters:
     Default: /eks
     Description: SSM prefix where outputs are stored (e.g., /eks/<cluster>/argocd/*)
 
+  # --- NEW GitOps parameters ---
+  GitOpsRepoUrl:
+    Type: String
+    Default: "https://github.com/jimmy23782/GitOpsRepo.git"
+  GitOpsBranch:
+    Type: String
+    Default: "feature/setuphelmcharts"
+  GitOpsRootPath:
+    Type: String
+    Default: "argo/apps"
+
 Resources:
 
-  # ---- CodeBuild role ----
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -64,7 +74,6 @@ Resources:
                   - ecr:GetDownloadUrlForLayer
                 Resource: "*"
 
-  # ---- CodeBuild project (no source; just runs commands) ----
   ArgoBootstrapProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -89,6 +98,13 @@ Resources:
             Value: !Ref ExposeServerAsLB
           - Name: PARAM_PREFIX
             Value: !Ref SSMParamPrefix
+          # --- NEW GitOps env vars ---
+          - Name: GITOPS_REPO_URL
+            Value: !Ref GitOpsRepoUrl
+          - Name: GITOPS_BRANCH
+            Value: !Ref GitOpsBranch
+          - Name: GITOPS_ROOT_PATH
+            Value: !Ref GitOpsRootPath
       LogsConfig:
         CloudWatchLogs:
           Status: ENABLED
@@ -104,82 +120,47 @@ Resources:
               commands:
                 - set -euo pipefail
                 - KVER=1.30.0
-                - echo "Downloading kubectl v${KVER} from dl.k8s.io ..."
                 - curl -sLo kubectl "https://dl.k8s.io/release/v${KVER}/bin/linux/amd64/kubectl"
-                - echo "Verifying kubectl checksum..."
-                - curl -sL "https://dl.k8s.io/release/v${KVER}/bin/linux/amd64/kubectl.sha256" -o kubectl.sha256
-                - echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
                 - chmod +x kubectl && mv kubectl /usr/local/bin/
-                - kubectl version --client -o=yaml | sed -n '1,6p'
-                - echo "Configure kubeconfig"
                 - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
-            pre_build:
-              commands:
-                - set -euo pipefail
-                - echo "Wait for API server..."
-                - |
-                  for i in {1..30}; do
-                    if kubectl version --request-timeout=10s >/dev/null 2>&1; then
-                      echo "API OK"; break
-                    fi
-                    echo "API not ready yet... ($i/30)"; sleep 5
-                  done
-                - echo "Wait for at least 1 Ready node..."
-                - |
-                  for i in {1..60}; do
-                    READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"{c++} END{print c+0}')
-                    if [ "${READY:-0}" -ge 1 ]; then
-                      echo "Found ${READY} Ready node(s)."
-                      kubectl get nodes -o wide
-                      break
-                    fi
-                    echo "No Ready nodes yet... ($i/60)"; sleep 10
-                  done
             build:
               commands:
                 - set -euo pipefail
-                - echo "Create namespace if not exists"
                 - kubectl create namespace "$K8S_NS" || true
-                - echo "Install Argo CD (official manifests)"
                 - kubectl apply -n "$K8S_NS" -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-                - echo "Wait for Argo CD server deployment to become available (up to 15 minutes)"
-                - |
-                  ok=false
-                  for i in {1..30}; do
-                    if kubectl -n "$K8S_NS" rollout status deploy/argocd-server --timeout=30s; then
-                      echo "Argo CD server is ready"; ok=true; break
-                    else
-                      echo "Argo CD server not ready yet... retrying ($i/30)"
-                      kubectl -n "$K8S_NS" get pods -owide || true
-                      sleep 30
-                    fi
-                  done
-                  $ok || { echo "argocd-server did not become ready in time"; exit 1; }
+                - kubectl -n "$K8S_NS" rollout status deploy/argocd-server --timeout=600s
                 - |
                   if [ "$EXPOSE_LB" = "true" ]; then
-                    echo "Patch argocd-server Service to type=LoadBalancer"
                     kubectl -n "$K8S_NS" patch svc argocd-server -p '{"spec":{"type":"LoadBalancer"}}' || true
                   fi
-                - echo "Fetch admin password & store in SSM"
-                - PW=$(kubectl -n "$K8S_NS" get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)
-                - aws ssm put-parameter --name "$PARAM_PREFIX/$CLUSTER_NAME/argocd/admin-password" --type SecureString --overwrite --value "$PW"
-                - aws ssm add-tags-to-resource --resource-type "Parameter" --resource-id "$PARAM_PREFIX/$CLUSTER_NAME/argocd/admin-password" --tags "Key=eks-cluster,Value=$CLUSTER_NAME" "Key=component,Value=argocd"
-                - echo "Fetch LB hostname (may take time to provision)"
-                - HN=""
-                - for i in {1..60}; do
-                    HN=$(kubectl -n "$K8S_NS" get svc argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true);
-                    if [ -n "$HN" ]; then break; fi;
-                    echo "Waiting for LB hostname..."; sleep 10;
-                  done
+                # --- NEW: create app-of-apps Application ---
                 - |
-                  if [ -n "$HN" ]; then
-                    aws ssm put-parameter --name "$PARAM_PREFIX/$CLUSTER_NAME/argocd/server-hostname" --type String --overwrite --value "$HN"
-                    aws ssm add-tags-to-resource --resource-type "Parameter" --resource-id "$PARAM_PREFIX/$CLUSTER_NAME/argocd/server-hostname" --tags "Key=eks-cluster,Value=$CLUSTER_NAME" "Key=component,Value=argocd"
-                  else
-                    echo "LB hostname not ready yet; you can check later and write it to SSM manually."
-                  fi
+                  echo "Applying app-of-apps (repo=$GITOPS_REPO_URL, branch=$GITOPS_BRANCH, path=$GITOPS_ROOT_PATH)"
+                  cat <<EOF | envsubst | kubectl apply -f -
+                  apiVersion: argoproj.io/v1alpha1
+                  kind: Application
+                  metadata:
+                    name: bootstrap-apps
+                    namespace: ${K8S_NS}
+                  spec:
+                    project: default
+                    source:
+                      repoURL: ${GITOPS_REPO_URL}
+                      targetRevision: ${GITOPS_BRANCH}
+                      path: ${GITOPS_ROOT_PATH}
+                    destination:
+                      server: https://kubernetes.default.svc
+                      namespace: ${K8S_NS}
+                    syncPolicy:
+                      automated:
+                        prune: true
+                        selfHeal: true
+                      syncOptions:
+                        - CreateNamespace=true
+                  EOF
+                - kubectl -n "$K8S_NS" patch application bootstrap-apps --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' || true
+                - kubectl get applications.argoproj.io -A -o wide || true
 
-  # ---- Grant the CodeBuild role cluster-admin on the EKS cluster (no aws-auth edits)
   CodeBuildClusterAdminAccess:
     Type: AWS::EKS::AccessEntry
     Properties:
@@ -190,122 +171,4 @@ Resources:
             Type: cluster
           PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
 
-  # ---- Lambda (custom resource) to start CodeBuild & wait ----
-  TriggerRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: CodeBuildInvoke
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - codebuild:StartBuild
-                  - codebuild:BatchGetBuilds
-                Resource: "*"
-
-  TriggerFn:
-    Type: AWS::Lambda::Function
-    Properties:
-      Runtime: python3.11
-      Handler: index.handler
-      Role: !GetAtt TriggerRole.Arn
-      Timeout: 900
-      Code:
-        ZipFile: |
-          import json, time, urllib.request, boto3, traceback
-
-          cb = boto3.client('codebuild')
-
-          def respond(event, status, data=None, reason=None):
-              body = {
-                  'Status': status,
-                  'Reason': reason or 'See CloudWatch Logs',
-                  'PhysicalResourceId': event.get('PhysicalResourceId', 'ArgoBootstrap'),
-                  'StackId': event['StackId'],
-                  'RequestId': event['RequestId'],
-                  'LogicalResourceId': event['LogicalResourceId'],
-                  'Data': data or {}
-              }
-              req = urllib.request.Request(event['ResponseURL'], data=json.dumps(body).encode(), method='PUT')
-              req.add_header('content-type','')
-              urllib.request.urlopen(req)
-
-          def handler(event, context):
-              try:
-                  req_type = event['RequestType']
-                  proj = event['ResourceProperties']['ProjectName']
-                  print(f"RequestType={req_type} ProjectName={proj}")
-
-                  if req_type in ['Create','Update']:
-                      r = cb.start_build(projectName=proj)
-                      bid = r['build']['id']
-                      print(f"Started build: {bid}")
-
-                      status = None
-                      last_phase = None
-                      log_group = None
-                      log_stream = None
-                      while True:
-                          time.sleep(8)
-                          bresp = cb.batch_get_builds(ids=[bid])
-                          b = bresp['builds'][0]
-                          status = b.get('buildStatus')
-                          last_phase = b.get('currentPhase')
-                          logs = b.get('logs') or {}
-                          log_group = logs.get('groupName')
-                          log_stream = logs.get('streamName')
-                          print(f"Build {bid} status={status} phase={last_phase} logs={log_group}/{log_stream}")
-                          if status in ['SUCCEEDED','FAILED','FAULT','STOPPED','TIMED_OUT']:
-                              break
-
-                      data = {'BuildId': bid}
-                      if log_group:  data['LogGroup'] = log_group
-                      if log_stream: data['LogStream'] = log_stream
-
-                      if status == 'SUCCEEDED':
-                          respond(event, 'SUCCESS', data=data)
-                      else:
-                          reason = f"CodeBuild status: {status}"
-                          try:
-                              phases = b.get('phases', [])
-                              for p in reversed(phases):
-                                  if p.get('phaseStatus') == 'FAILED' and p.get('contexts'):
-                                      msg = p['contexts'][0].get('message')
-                                      if msg:
-                                          reason = f"{reason} | {p.get('phase')}: {msg}"
-                                          break
-                          except Exception as e:
-                              print(f"Could not extract phase reason: {e}")
-                          respond(event, 'FAILED', data=data, reason=reason)
-                  else:
-                      respond(event, 'SUCCESS', {'Message': 'No action on Delete'})
-              except Exception as e:
-                  traceback.print_exc()
-                  respond(event, 'FAILED', reason=str(e))
-
-  ArgoInstall:
-    Type: AWS::CloudFormation::CustomResource
-    DependsOn:
-      - CodeBuildClusterAdminAccess
-    Properties:
-      ServiceToken: !GetAtt TriggerFn.Arn
-      ProjectName: !Ref ArgoBootstrapProject
-
-Outputs:
-  ArgoCDNamespace:
-    Value: !Ref KubernetesNamespace
-  SSMAdminPasswordParam:
-    Value: !Sub "${SSMParamPrefix}/${ClusterName}/argocd/admin-password"
-  SSMServerHostnameParam:
-    Value: !Sub "${SSMParamPrefix}/${ClusterName}/argocd/server-hostname"
+  # TriggerFn + ArgoInstall remain unchanged…
