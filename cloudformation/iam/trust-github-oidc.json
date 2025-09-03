@@ -11,6 +11,7 @@
       "StringLike": {
         "token.actions.githubusercontent.com:sub": [
           "repo:jimmy23782/infraRepo:ref:refs/heads/main",
+          "repo:jimmy23782/infraRepo:ref:refs/heads/feature/*",
           "repo:jimmy23782/infraRepo:pull_request"
         ]
       }
