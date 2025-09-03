@@ -63,6 +63,32 @@ jobs:
           aws cloudformation validate-template --template-body file://cloudformation/argocd-bootstrap.yaml
 
       # ---------- VPC ----------
+
+      # ---------- VPC (heal DELETE_FAILED before doing anything) ----------
+      - name: Preflight - heal/delete stuck VPC stack
+        run: |
+          set -euo pipefail
+          STACK="${VPC_STACK}"
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          echo "VPC stack status: $STATUS"
+          if [[ "$STATUS" == "DELETE_FAILED" || "$STATUS" == "ROLLBACK_FAILED" || "$STATUS" == "ROLLBACK_COMPLETE" ]]; then
+            echo "Attempting forced delete of $STACK ..."
+            # find logical resources that failed deletion (retain them so the stack can delete)
+            mapfile -t FAILS < <(
+              aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 200 \
+                --query "reverse(StackEvents)[?contains(ResourceStatus,'DELETE_FAILED')].[LogicalResourceId]" \
+                --output text | awk '!seen[$0]++'
+            )
+            if [[ ${#FAILS[@]} -gt 0 ]]; then
+              echo "Retaining resources: ${FAILS[*]}"
+              aws cloudformation delete-stack --stack-name "$STACK" --retain-resources ${FAILS[*]} || true
+            else
+              aws cloudformation delete-stack --stack-name "$STACK" || true
+            fi
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+          fi
+          
       - name: Preflight - wait if VPC stack is IN_PROGRESS
         run: |
           set -e
