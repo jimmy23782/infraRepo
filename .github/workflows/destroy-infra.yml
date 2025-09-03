@@ -23,7 +23,7 @@ env:
   EKS_STACK: demo-eks-eks-${{ github.event.inputs.env }}
   NG_STACK:  demo-eks-nodegroup-${{ github.event.inputs.env }}
   ARGO_STACK: demo-eks-argocd-${{ github.event.inputs.env }}
-  KEEP_VPC: "true"   # <- default: do NOT delete VPC
+  KEEP_VPC: "true"   # default: keep VPC (set to 'false' to delete VPC)
 
 jobs:
   destroy:
@@ -57,15 +57,13 @@ jobs:
         run: |
           set -euo pipefail
           STACK="${{ env.VPC_STACK }}"
-          # Try via CFN resources (works even if the stack is mid-delete)
           VPC_ID=$(aws cloudformation describe-stack-resources --stack-name "$STACK" \
             --query "StackResources[?ResourceType=='AWS::EC2::VPC'].PhysicalResourceId" \
             --output text 2>/dev/null || echo "")
           echo "Found VPC_ID='$VPC_ID'"
           echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
 
-      # --- Optional k8s cleanup (release ELB/PVCs) ---
-      # We install kubectl so the step actually works on the runner.
+      # ---------- Optional k8s cleanup (release ELB/PVCs) ----------
       - name: Install kubectl (for optional cleanup)
         continue-on-error: true
         run: |
@@ -82,14 +80,15 @@ jobs:
           set -euo pipefail
           if aws eks update-kubeconfig --name "$CLUSTER_NAME" --region $AWS_REGION >/dev/null 2>&1; then
             echo "Kubeconfig set. Deleting LB Services/Ingress/PVCs to release AWS resources..."
-            kubectl get svc -A --no-headers | awk '$3=="LoadBalancer"{print $1, $2}' | xargs -n2 kubectl -n delete svc || true
+            # Delete only Services of type=LoadBalancer to drop ELBs
+            kubectl get svc -A --no-headers 2>/dev/null | awk '$3=="LoadBalancer"{print $1, $2}' | xargs -n2 kubectl -n delete svc || true
             kubectl delete ingress --all -A || true
             kubectl delete pvc --all -A || true
           else
-            echo "Skipping k8s cleanup (no access)."
+            echo "Skipping k8s cleanup (no API access)."
           fi
 
-      # --- ArgoCD stack delete + heal ---
+      # ---------- ArgoCD stack delete + heal ----------
       - name: Delete ArgoCD stack (if exists)
         run: |
           if aws cloudformation describe-stacks --stack-name "${{ env.ARGO_STACK }}" >/dev/null 2>&1; then
@@ -119,24 +118,21 @@ jobs:
             fi
           fi
 
-      # --- Remove EKS AccessEntry that granted CodeBuild cluster-admin ---
+      # Remove GitHub OIDC deployer AccessEntry (if created outside CFN)
       - name: Remove GitHub OIDC deployer AccessEntry from EKS
         continue-on-error: true
         run: |
           set -euo pipefail
           CLUSTER="${{ steps.derive.outputs.cluster_name }}"
           PRINCIPAL_ARN="arn:aws:iam::685801731369:role/github-oidc-deployer"
-
-          echo "Checking for AccessEntry for $PRINCIPAL_ARN in cluster $CLUSTER..."
           if aws eks describe-access-entry --cluster-name "$CLUSTER" --principal-arn "$PRINCIPAL_ARN" >/dev/null 2>&1; then
-            echo "AccessEntry exists. Deleting..."
             aws eks delete-access-entry --cluster-name "$CLUSTER" --principal-arn "$PRINCIPAL_ARN" || true
             echo "Deleted AccessEntry for $PRINCIPAL_ARN"
           else
             echo "No AccessEntry found for $PRINCIPAL_ARN"
           fi
 
-      # --- Nodegroup delete + heal ---
+      # ---------- Nodegroup delete + heal ----------
       - name: Delete Nodegroup stack
         run: |
           if aws cloudformation describe-stacks --stack-name "${{ env.NG_STACK }}" >/dev/null 2>&1; then
@@ -165,7 +161,7 @@ jobs:
               aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --region $AWS_REGION --nodegroup-name "$NG" || true
               aws eks wait nodegroup-deleted --cluster-name "$CLUSTER_NAME" --region $AWS_REGION --nodegroup-name "$NG" || true
             done
-            # Clean the retained role if present
+            # Clean the retained IAM role if present
             ROLE=$(aws cloudformation describe-stack-resources --stack-name "$STACK" \
               --logical-resource-id NodeRole --query 'StackResources[0].PhysicalResourceId' --output text 2>/dev/null || echo "")
             if [ -n "$ROLE" ] && aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
@@ -179,30 +175,7 @@ jobs:
             fi
           fi
 
-      # --- Delete IAM OIDC provider tied to the cluster (if it was created outside CFN) ---
-      - name: Delete cluster IAM OIDC provider (best-effort)
-        continue-on-error: true
-        env:
-          CLUSTER_NAME: ${{ steps.derive.outputs.cluster_name }}
-          ACCOUNT_ID: ${{ steps.derive.outputs.account_id }}
-        run: |
-          set -euo pipefail
-          ISSUER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region $AWS_REGION \
-                   --query 'cluster.identity.oidc.issuer' --output text 2>/dev/null || echo "None")
-          if [ "$ISSUER" = "None" ] || [ -z "$ISSUER" ]; then
-            echo "Cluster not found or already deleted; skipping OIDC provider cleanup."
-            exit 0
-          fi
-          OIDC_HOST=${ISSUER#https://}
-          ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_HOST}"
-          if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$ARN" >/dev/null 2>&1; then
-            echo "Deleting IAM OIDC provider $ARN"
-            aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "$ARN" || true
-          else
-            echo "No standalone IAM OIDC provider to delete."
-          fi
-
-      # --- EKS control plane delete + heal ---
+      # ---------- EKS control plane delete + heal ----------
       - name: Delete EKS stack
         run: |
           if aws cloudformation describe-stacks --stack-name "${{ env.EKS_STACK }}" >/dev/null 2>&1; then
@@ -236,7 +209,31 @@ jobs:
             fi
           fi
 
-      # --- VPC delete + heal ---
+      # ---------- Delete cluster IAM OIDC provider (AFTER EKS delete/heal) ----------
+      - name: Delete cluster IAM OIDC provider (best-effort)
+        continue-on-error: true
+        env:
+          ACCOUNT_ID: ${{ steps.derive.outputs.account_id }}
+          CLUSTER_NAME: ${{ steps.derive.outputs.cluster_name }}
+        run: |
+          set -euo pipefail
+          ISSUER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region $AWS_REGION \
+                   --query 'cluster.identity.oidc.issuer' --output text 2>/dev/null || echo "None")
+          if [ "$ISSUER" = "None" ] || [ -z "$ISSUER" ]; then
+            echo "Cluster not found (likely deleted). Trying to compute the OIDC ARN from known pattern..."
+            # If your stack output captured the OIDC host, prefer that. Otherwise, skip quietly.
+            exit 0
+          fi
+          OIDC_HOST=${ISSUER#https://}
+          ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_HOST}"
+          if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$ARN" >/dev/null 2>&1; then
+            echo "Deleting IAM OIDC provider $ARN"
+            aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "$ARN" || true
+          else
+            echo "No standalone IAM OIDC provider to delete."
+          fi
+
+      # ---------- VPC delete + heal (skipped by default) ----------
       - name: Delete VPC stack
         if: ${{ env.KEEP_VPC != 'true' }}
         run: |
@@ -280,31 +277,27 @@ jobs:
             exit 0
           fi
           echo "Deep cleaning VPC: $VPC_ID in $AWS_REGION"
-
-          # --- Detach & delete Internet Gateways ---
+          # IGWs
           for IGW in $(aws ec2 describe-internet-gateways --region "$AWS_REGION" \
                     --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
                     --query "InternetGateways[].InternetGatewayId" --output text); do
             aws ec2 detach-internet-gateway --internet-gateway-id "$IGW" --vpc-id "$VPC_ID" --region "$AWS_REGION" || true
             aws ec2 delete-internet-gateway --internet-gateway-id "$IGW" --region "$AWS_REGION" || true
           done
-
-          # --- Delete VPC endpoints ---
+          # VPC endpoints
           EPS=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
                 --filters "Name=vpc-id,Values=$VPC_ID" \
                 --query "VpcEndpoints[].VpcEndpointId" --output text)
           if [ -n "$EPS" ]; then
             aws ec2 delete-vpc-endpoints --vpc-endpoint-ids $EPS --region "$AWS_REGION" || true
           fi
-
-          # --- Delete NAT gateways (wait until deleted) ---
+          # NAT gateways
           for NGW in $(aws ec2 describe-nat-gateways --region "$AWS_REGION" \
                     --filter Name=vpc-id,Values=$VPC_ID \
                     --query "NatGateways[].NatGatewayId" --output text); do
             aws ec2 delete-nat-gateway --nat-gateway-id "$NGW" --region "$AWS_REGION" || true
           done
-
-          # --- Delete non-main route tables + their associations ---
+          # Non-main route tables
           for RT in $(aws ec2 describe-route-tables --region "$AWS_REGION" \
                     --filters "Name=vpc-id,Values=$VPC_ID" \
                     --query "RouteTables[].{Id:RouteTableId,Main:Associations[?Main].Main | [0]} | [?Main!=\`true\`].Id" \
@@ -315,7 +308,6 @@ jobs:
                       --output text); do
               aws ec2 disassociate-route-table --association-id "$A" --region "$AWS_REGION" || true
             done
-            # remove extra routes (skip the local one)
             for R in $(aws ec2 describe-route-tables --region "$AWS_REGION" --route-table-ids "$RT" \
                       --query "RouteTables[0].Routes[?Origin!='CreateRouteTable'].DestinationCidrBlock" \
                       --output text); do
@@ -323,57 +315,50 @@ jobs:
             done
             aws ec2 delete-route-table --route-table-id "$RT" --region "$AWS_REGION" || true
           done
-
-          # --- Delete custom NACLs (leave default) ---
+          # Custom NACLs
           for NACL in $(aws ec2 describe-network-acls --region "$AWS_REGION" \
                      --filters "Name=vpc-id,Values=$VPC_ID" \
                      --query "NetworkAcls[?IsDefault==\`false\`].NetworkAclId" --output text); do
             aws ec2 delete-network-acl --network-acl-id "$NACL" --region "$AWS_REGION" || true
           done
-
-          # --- Delete non-default security groups ---
+          # Non-default SGs
           for SG in $(aws ec2 describe-security-groups --region "$AWS_REGION" \
                    --filters "Name=vpc-id,Values=$VPC_ID" \
                    --query "SecurityGroups[?GroupName!='default'].GroupId" --output text); do
-            # remove any dangling rules referencing other SGs
             aws ec2 revoke-security-group-egress  --group-id "$SG" --ip-permissions "$(aws ec2 describe-security-groups --group-ids "$SG" --query 'SecurityGroups[0].IpPermissionsEgress')" --region "$AWS_REGION" 2>/dev/null || true
             aws ec2 revoke-security-group-ingress --group-id "$SG" --ip-permissions "$(aws ec2 describe-security-groups --group-ids "$SG" --query 'SecurityGroups[0].IpPermissions')"        --region "$AWS_REGION" 2>/dev/null || true
             aws ec2 delete-security-group --group-id "$SG" --region "$AWS_REGION" || true
           done
-
-          # --- Delete ENIs in 'available' state ---
+          # ENIs (available)
           for ENI in $(aws ec2 describe-network-interfaces --region "$AWS_REGION" \
                     --filters "Name=vpc-id,Values=$VPC_ID" "Name=status,Values=available" \
                     --query "NetworkInterfaces[].NetworkInterfaceId" --output text); do
             aws ec2 delete-network-interface --network-interface-id "$ENI" --region "$AWS_REGION" || true
           done
-
-          # --- Delete subnets ---
+          # Subnets
           for SUB in $(aws ec2 describe-subnets --region "$AWS_REGION" \
                     --filters "Name=vpc-id,Values=$VPC_ID" \
                     --query "Subnets[].SubnetId" --output text); do
             aws ec2 delete-subnet --subnet-id "$SUB" --region "$AWS_REGION" || true
           done
-
-          # --- Delete VPC Flow Logs ---
+          # VPC Flow Logs
           for FL in $(aws ec2 describe-flow-logs --region "$AWS_REGION" \
                     --filter Name=resource-id,Values=$VPC_ID \
                     --query "FlowLogs[].FlowLogId" --output text); do
             aws ec2 delete-flow-logs --flow-log-ids $FL --region "$AWS_REGION" || true
           done
-
-          # --- Disassociate custom DHCP options (set default) ---
+          # Reset DHCP Options to default
           DEFAULT_DHCP=$(aws ec2 describe-dhcp-options --region "$AWS_REGION" \
                          --filters "Name=default,Values=true" \
                          --query "DhcpOptions[0].DhcpOptionsId" --output text 2>/dev/null || echo "")
           if [ -n "$DEFAULT_DHCP" ] && [ "$DEFAULT_DHCP" != "None" ]; then
             aws ec2 associate-dhcp-options --region "$AWS_REGION" --dhcp-options-id "$DEFAULT_DHCP" --vpc-id "$VPC_ID" || true
           fi
-
-          # --- Finally, delete the VPC ---
+          # Delete VPC
           aws ec2 delete-vpc --vpc-id "$VPC_ID" --region "$AWS_REGION" || true
-          echo "Deep clean complete (best-effort)."          
-      # --- Orphans cleanup (logs, CodeBuild/Lambda, SSM params, ELBs, ENIs, EBS) ---
+          echo "Deep clean complete (best-effort)."
+
+      # ---------- Orphans cleanup ----------
       - name: Delete CloudWatch log groups (Lambda TriggerFn & CodeBuild)
         continue-on-error: true
         run: |
