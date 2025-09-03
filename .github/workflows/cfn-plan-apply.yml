@@ -298,7 +298,7 @@ jobs:
             --template-file cloudformation/argocd-bootstrap.yaml \
             --stack-name "${ARGO_STACK}" \
             --parameter-overrides \
-              ClusterName=${{ env.PREFIX }}-${{ env.ENV }} \
+              ClusterName=demo-eks-dev \
               Region=${{ env.AWS_REGION }} \
               KubernetesNamespace=argocd \
               ExposeServerAsLB=true \

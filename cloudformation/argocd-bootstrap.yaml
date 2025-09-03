@@ -21,16 +21,16 @@ Parameters:
     Default: /eks
     Description: SSM prefix where outputs are stored (e.g., /eks/<cluster>/argocd/*)
 
-  # --- NEW GitOps parameters ---
   GitOpsRepoUrl:
     Type: String
-    Default: "https://github.com/jimmy23782/GitOpsRepo.git"
+    Description: Git repo URL for app-of-apps (e.g., https://github.com/jimmy23782/GitOpsRepo.git)
   GitOpsBranch:
     Type: String
-    Default: "feature/setuphelmcharts"
+    Default: feature/setuphelmcharts   # <- set to your feature branch (optional; you also pass this in workflow)
   GitOpsRootPath:
     Type: String
-    Default: "argo/apps"
+    Default: argo/apps
+    Description: Path in repo that holds child apps (app-of-apps)
 
 Resources:
 
@@ -98,7 +98,6 @@ Resources:
             Value: !Ref ExposeServerAsLB
           - Name: PARAM_PREFIX
             Value: !Ref SSMParamPrefix
-          # --- NEW GitOps env vars ---
           - Name: GITOPS_REPO_URL
             Value: !Ref GitOpsRepoUrl
           - Name: GITOPS_BRANCH
@@ -120,23 +119,66 @@ Resources:
               commands:
                 - set -euo pipefail
                 - KVER=1.30.0
+                - echo "Downloading kubectl v${KVER}..."
                 - curl -sLo kubectl "https://dl.k8s.io/release/v${KVER}/bin/linux/amd64/kubectl"
+                - echo "Verifying kubectl checksum..."
+                - curl -sL "https://dl.k8s.io/release/v${KVER}/bin/linux/amd64/kubectl.sha256" -o kubectl.sha256
+                - echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
                 - chmod +x kubectl && mv kubectl /usr/local/bin/
+                - kubectl version --client --output=yaml | sed -n '1,6p'
+                - echo "Configure kubeconfig"
                 - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
+            pre_build:
+              commands:
+                - set -euo pipefail
+                - echo "Wait for API server..."
+                - |
+                  for i in {1..30}; do
+                    if kubectl version --request-timeout=10s >/dev/null 2>&1; then
+                      echo "API OK"; break
+                    fi
+                    echo "API not ready yet... ($i/30)"; sleep 5
+                  done
+                - echo "Wait for at least 1 Ready node..."
+                - |
+                  for i in {1..60}; do
+                    READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"{c++} END{print c+0}')
+                    if [ "${READY:-0}" -ge 1 ]; then
+                      echo "Found ${READY} Ready node(s)."
+                      kubectl get nodes -o wide
+                      break
+                    fi
+                    echo "No Ready nodes yet... ($i/60)"; sleep 10
+                  done
             build:
               commands:
                 - set -euo pipefail
+                - echo "Create namespace if not exists"
                 - kubectl create namespace "$K8S_NS" || true
+                - echo "Install Argo CD (official manifests)"
                 - kubectl apply -n "$K8S_NS" -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-                - kubectl -n "$K8S_NS" rollout status deploy/argocd-server --timeout=600s
+                - echo "Wait for Argo CD server deployment to become available (up to 15 minutes)"
+                - |
+                  ok=false
+                  for i in {1..30}; do
+                    if kubectl -n "$K8S_NS" rollout status deploy/argocd-server --timeout=30s; then
+                      echo "Argo CD server is ready"; ok=true; break
+                    else
+                      echo "Argo CD server not ready yet... retrying ($i/30)"
+                      kubectl -n "$K8S_NS" get pods -owide || true
+                      sleep 30
+                    fi
+                  done
+                  $ok || { echo "argocd-server did not become ready in time"; exit 1; }
                 - |
                   if [ "$EXPOSE_LB" = "true" ]; then
+                    echo "Patch argocd-server Service to type=LoadBalancer"
                     kubectl -n "$K8S_NS" patch svc argocd-server -p '{"spec":{"type":"LoadBalancer"}}' || true
                   fi
-                # --- NEW: create app-of-apps Application ---
+                # --- create/refresh app-of-apps pointing to your GitOps repo/branch/path ---
                 - |
                   echo "Applying app-of-apps (repo=$GITOPS_REPO_URL, branch=$GITOPS_BRANCH, path=$GITOPS_ROOT_PATH)"
-                  cat <<EOF | envsubst | kubectl apply -f -
+                  cat <<EOF | kubectl apply -f -
                   apiVersion: argoproj.io/v1alpha1
                   kind: Application
                   metadata:
@@ -158,6 +200,7 @@ Resources:
                       syncOptions:
                         - CreateNamespace=true
                   EOF
+                - echo "Force-refresh app-of-apps to trigger reconciliation"
                 - kubectl -n "$K8S_NS" patch application bootstrap-apps --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' || true
                 - kubectl get applications.argoproj.io -A -o wide || true
 
@@ -170,5 +213,3 @@ Resources:
         - AccessScope:
             Type: cluster
           PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
-
-  # TriggerFn + ArgoInstall remain unchanged…
