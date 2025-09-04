@@ -43,9 +43,9 @@ jobs:
 
       # If you ever change trust boundaries, uncomment to update trust from repo
       # (Note: requires iam:UpdateAssumeRolePolicy on the target role)
-      # - name: Update trust policy from repo JSON
-      #   run: |
-      #     TRUST=$(cat cloudformation/iam/github-oidc-trust.json)
-      #     aws iam update-assume-role-policy \
-      #       --role-name "$ROLE_NAME" \
-      #       --policy-document "$TRUST"
+      - name: Update trust policy from repo JSON
+        run: |
+          TRUST=$(cat cloudformation/iam/github-oidc-trust.json)
+          aws iam update-assume-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-document "$TRUST"
