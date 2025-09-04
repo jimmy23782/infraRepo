@@ -34,7 +34,7 @@ env:
   # —— GitOps wiring for ArgoCD bootstrap ——
   GITOPS_REPO_URL: https://github.com/jimmy23782/GitOpsRepo.git
   GITOPS_BRANCH: feature/setuphelmcharts
-  GITOPS_ROOT_PATH: argo/apps
+  GITOPS_ROOT_PATH: gitopsRepo/argo/apps
 
 jobs:
   deploy:
