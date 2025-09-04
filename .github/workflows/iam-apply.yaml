@@ -2,7 +2,9 @@ name: iam-apply
 on:
   workflow_dispatch: {}   # run manually when you change JSONs
   push:
-    branches: ["main"]
+    branches:
+      - "main"
+      - "feature/**"
     paths:
       - "cloudformation/iam/**"
 
