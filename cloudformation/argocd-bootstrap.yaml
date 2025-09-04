@@ -31,6 +31,10 @@ Parameters:
     Type: String
     Default: gitopsRepo/argo/apps
     Description: Path in repo that holds child apps (app-of-apps)
+  RunToken:
+    Type: String
+    Default: ""
+    Description: Change this (e.g., to a timestamp/commit SHA) to re-run the bootstrap CodeBuild.
 
 Resources:
 
@@ -306,6 +310,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt TriggerFn.Arn
       ProjectName: !Ref ArgoBootstrapProject
+      RunToken: !Ref RunToken   # <— new, Lambda ignores it, CFN uses it to detect change
 
 Outputs:
   ArgoCDNamespace:
